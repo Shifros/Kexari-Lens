@@ -1,0 +1,39 @@
+{
+  "name": "kexari-lens",
+  "displayName": "Kexari Lens",
+  "description": "Visual element inspector and React context extractor for Next.js",
+  "version": "0.1.0",
+  "publisher": "shifros",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "kexariLens.start",
+        "title": "Kexari Lens: Start Inspector"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "http-proxy-middleware": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.11.0",
+    "@types/express": "^4.17.21",
+    "typescript": "^5.3.3"
+  }
+}

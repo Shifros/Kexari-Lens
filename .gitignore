@@ -1,0 +1,15 @@
+# Dependency directories
+node_modules/
+
+# Compiled files
+out/
+
+# VS Code test files
+.vscode-test/
+
+# Package files
+*.vsix
+
+# Operating system files
+.DS_Store
+Thumbs.db
