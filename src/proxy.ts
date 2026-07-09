@@ -16,7 +16,6 @@ export function startProxyServer(
   return new Promise((resolve, reject) => {
     const app = express();
 
-    // Serve the inspector script directly
     app.get('/kexari-inspector.js', (req, res) => {
       if (fs.existsSync(inspectorScriptPath)) {
         res.setHeader('Content-Type', 'application/javascript');
@@ -26,32 +25,28 @@ export function startProxyServer(
       }
     });
 
-    // Configure proxy middleware
     const proxyMiddleware = createProxyMiddleware({
       target: targetUrl,
       changeOrigin: true,
-      selfHandleResponse: true, // Required for responseInterceptor
-      ws: true, // Enable websocket proxying
+      selfHandleResponse: true, // needed so responseInterceptor can rewrite the body
+      ws: true, // needed for Next.js HMR
       on: {
         proxyRes: responseInterceptor(async (responseBuffer, proxyRes, req, res) => {
           const contentType = proxyRes.headers['content-type'];
           if (contentType && contentType.includes('text/html')) {
             const html = responseBuffer.toString('utf8');
-            // Inject the inspector script before the closing </body> tag
             if (html.includes('</body>')) {
               return html.replace(
                 '</body>',
                 `<script src="/kexari-inspector.js"></script></body>`
               );
             }
-            // Fallback: append at the end of html if no body tag found
             return html + `<script src="/kexari-inspector.js"></script>`;
           }
           return responseBuffer;
         }),
         error: (err, req, res) => {
           console.error('[Kexari Lens Proxy Error]:', err);
-          // Only send response if headers have not been sent yet
           if (res && 'writeHead' in res && typeof res.writeHead === 'function') {
             const httpRes = res as any;
             if (!httpRes.headersSent) {
@@ -65,12 +60,10 @@ export function startProxyServer(
       }
     });
 
-    // Use proxy middleware for all other requests
     app.use('/', proxyMiddleware);
 
     const server = http.createServer(app);
 
-    // Setup WebSockets (WS) proxying for Hot Module Replacement (HMR)
     server.on('upgrade', (req, socket, head) => {
       proxyMiddleware.upgrade(req, socket as any, head);
     });

@@ -9,7 +9,6 @@ export function activate(context: vscode.ExtensionContext) {
   console.log('Kexari Lens extension is now active!');
 
   let startCommand = vscode.commands.registerCommand('kexariLens.start', async () => {
-    // If the panel is already open, reveal it
     if (activePanel) {
       activePanel.reveal(vscode.ViewColumn.Beside);
       return;
@@ -28,12 +27,10 @@ export function activate(context: vscode.ExtensionContext) {
       cancellable: false
     }, async () => {
       try {
-        // Start proxy server if not already running
         if (!proxyInstance) {
           proxyInstance = await startProxyServer(proxyPort, targetUrl, inspectorScriptPath);
         }
 
-        // Create Webview Panel
         activePanel = vscode.window.createWebviewPanel(
           'kexariLensInspector',
           'Kexari Lens Inspector',
@@ -44,17 +41,16 @@ export function activate(context: vscode.ExtensionContext) {
           }
         );
 
-        // Set the webview html
         activePanel.webview.html = getWebviewContent(proxyUrl);
 
-        // Handle message from the webview
         activePanel.webview.onDidReceiveMessage(
           async (payload) => {
-            // Relativize path for nicer prompt formatting
             let displayPath = payload.fileName || 'Unknown';
             let resolvedLineNumber = payload.lineNumber || 0;
 
-            // Check if the reported path is invalid or is a compiled Next.js static chunk or node module
+            // A path pointing at a compiled Next.js chunk or something under
+            // node_modules isn't useful to show the user, so fall back to
+            // searching the workspace for the component by name instead.
             const isInvalidPath = !payload.fileName || 
                                   payload.fileName === 'Unknown' || 
                                   payload.fileName.toLowerCase().includes('_next/') || 
@@ -72,7 +68,6 @@ export function activate(context: vscode.ExtensionContext) {
             if (displayPath && displayPath !== 'Unknown' && vscode.workspace.workspaceFolders) {
               for (const folder of vscode.workspace.workspaceFolders) {
                 const workspacePath = folder.uri.fsPath;
-                // Normalize slashes for comparison
                 const normFile = path.normalize(displayPath);
                 const normWorkspace = path.normalize(workspacePath);
                 if (normFile.toLowerCase().startsWith(normWorkspace.toLowerCase())) {
@@ -82,10 +77,8 @@ export function activate(context: vscode.ExtensionContext) {
               }
             }
 
-            // Normalize backslashes to forward slashes for the AI prompt (more standard/cleaner)
             displayPath = displayPath.replace(/\\/g, '/');
 
-            // Format the final prompt
             const formattedPrompt = `[Kexari Lens Context]
 Target Component: ${payload.componentName}
 File Path: ${displayPath}:${resolvedLineNumber}
@@ -94,7 +87,6 @@ Element: <${payload.tagName} className="${payload.className}">
 Instruction:
 `;
 
-            // Copy to clipboard
             await vscode.env.clipboard.writeText(formattedPrompt);
             vscode.window.showInformationMessage(`Kexari Lens: Context for <${payload.componentName}> copied to clipboard!`);
           },
@@ -102,7 +94,6 @@ Instruction:
           context.subscriptions
         );
 
-        // Clean up on panel disposal
         activePanel.onDidDispose(
           async () => {
             activePanel = undefined;
@@ -362,9 +353,8 @@ function getWebviewContent(proxyUrl: string): string {
         const inspectorText = toggleInspectorBtn.querySelector('.inspector-text');
         
         let inspectorEnabled = true;
-        const proxyBaseUrl = "${proxyUrl}"; // e.g. http://localhost:3001
+        const proxyBaseUrl = "${proxyUrl}";
         
-        // Browser navigation controls
         reloadBtn.addEventListener('click', () => {
             iframe.contentWindow.postMessage({ type: 'KEXARI_LENS_NAVIGATE', action: 'reload' }, '*');
         });
@@ -380,8 +370,6 @@ function getWebviewContent(proxyUrl: string): string {
         urlInput.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
                 let targetPath = urlInput.value.trim();
-                
-                // Formulate target URL
                 let targetUrl = targetPath;
                 if (!targetPath.startsWith('/') && !targetPath.startsWith('http://') && !targetPath.startsWith('https://')) {
                     targetPath = '/' + targetPath;
@@ -395,7 +383,6 @@ function getWebviewContent(proxyUrl: string): string {
             }
         });
         
-        // Toggle visual inspector selection
         toggleInspectorBtn.addEventListener('click', () => {
             inspectorEnabled = !inspectorEnabled;
             if (inspectorEnabled) {
@@ -417,20 +404,18 @@ function getWebviewContent(proxyUrl: string): string {
             }
         }
         
-        // Re-apply toggle state on page load
+        // the iframe reloads on navigation, wiping the injected script's state,
+        // so we need to re-send the toggle state every time it loads
         iframe.addEventListener('load', () => {
             sendInspectorState();
         });
         
-        // Listen for messages from the iframe proxy page
         window.addEventListener('message', (event) => {
             const message = event.data;
             if (message) {
                 if (message.type === 'KEXARI_LENS_INSPECTOR_CLICK') {
-                    // Forward click payload to extension host
                     vscode.postMessage(message.payload);
                 } else if (message.type === 'KEXARI_LENS_URL_CHANGED') {
-                    // Synchronize the URL input box
                     const currentUrl = message.payload.url;
                     if (currentUrl.startsWith(proxyBaseUrl)) {
                         urlInput.value = currentUrl.substring(proxyBaseUrl.length) || '/';

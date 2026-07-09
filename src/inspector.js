@@ -1,5 +1,5 @@
 (function () {
-  // Prevent duplicate insertion
+  // the proxy injects this on every page load, so bail if it's already here
   if (window.__kexari_lens_injected__) return;
   window.__kexari_lens_injected__ = true;
 
@@ -7,7 +7,6 @@
 
   let inspectorEnabled = true;
 
-  // Create badge element
   const badge = document.createElement('div');
   badge.id = 'kexari-lens-badge';
   Object.assign(badge.style, {
@@ -27,7 +26,9 @@
   });
   document.body.appendChild(badge);
 
-  // Helper to parse stack traces from React 19 _debugStack
+  // React 19 dropped _debugSource, but it still attaches an Error to each fiber
+  // (_debugStack) captured at the point the JSX was written. We parse that stack
+  // to recover the file and line, same idea as _debugSource used to give us.
   function parseStack(debugStack) {
     if (!debugStack) return null;
     let stack = '';
@@ -42,18 +43,14 @@
     const lines = stack.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      // Regex to match webpack-internal URLs or localhost/file URLs with line numbers
       const match = line.match(/at\s+(?:(?:\s|\w|\$|<|>|\[|\]|\.)+\s+)?\((?:webpack-internal:\/\/\/\(.*\)\/|http:\/\/localhost:\d+\/|file:\/\/+)?([^?)]+)(?:\?[^)]*)?:(\d+):(\d+)\)/) ||
                     line.match(/at\s+(?:webpack-internal:\/\/\/\(.*\)\/|http:\/\/localhost:\d+\/|file:\/\/+)?([^?:\s)]+)(?:\?[^:\s)]*)?:(\d+):(\d+)/);
       
       if (match) {
         let filePath = match[1];
         const lineNum = parseInt(match[2], 10);
-
-        // Normalize separators
         filePath = filePath.replace(/\\/g, '/');
 
-        // Ignore third-party and framework internals
         const lowerPath = filePath.toLowerCase();
         if (lowerPath.includes('node_modules') || 
             lowerPath.includes('next/dist') || 
@@ -63,7 +60,6 @@
           continue;
         }
 
-        // Clean path prefixes
         filePath = filePath.replace(/^webpack-internal:\/\/\/\([^)]+\)\//, '');
         filePath = filePath.replace(/^\.\//, '');
         filePath = filePath.replace(/^file:\/\/\//, '');
@@ -78,7 +74,10 @@
     return null;
   }
 
-  // Helper to extract React Fiber details
+  // Walks up the fiber tree from a DOM node looking for the nearest named
+  // component and its source location. We keep a separate "fallback" result
+  // for anything that resolves into node_modules, since we'd rather show the
+  // user's own component than a UI library wrapper if one is available.
   function getReactInfo(element) {
     const key = Object.keys(element).find(k => k.startsWith('__reactFiber$'));
     if (!key) return null;
@@ -167,7 +166,6 @@
     };
   }
 
-  // Monitor URL changes to notify the main extension bar
   function reportUrlChange() {
     window.parent.postMessage({
       type: 'KEXARI_LENS_URL_CHANGED',
@@ -178,13 +176,11 @@
     }, '*');
   }
 
-  // Report URL immediately on initialization
   reportUrlChange();
-
-  // Listen to popstate for back/forward navigation reporting
   window.addEventListener('popstate', reportUrlChange);
 
-  // Monkey-patch history methods to track SPA client-side navigations (Next.js Link clicks)
+  // Next.js <Link> navigation uses pushState/replaceState directly instead of
+  // firing popstate, so we patch these to catch client-side route changes too.
   const pushStateOrig = window.history.pushState;
   const replaceStateOrig = window.history.replaceState;
 
@@ -198,14 +194,12 @@
     reportUrlChange();
   };
 
-  // Receive commands from parent VS Code Webview
   window.addEventListener('message', (event) => {
     const msg = event.data;
     if (msg) {
       if (msg.type === 'KEXARI_LENS_SET_STATE') {
         inspectorEnabled = msg.enabled;
         if (!inspectorEnabled) {
-          // Hide badge and clear outlines
           badge.style.display = 'none';
           const activeEl = document.querySelector('[data-kexari-prev-outline]');
           if (activeEl) {
@@ -225,30 +219,27 @@
     }
   });
 
-  // Mouse over handler to highlight and show badge
   document.addEventListener('mouseover', (e) => {
     if (!inspectorEnabled) return;
     const el = e.target;
     if (!el || el === badge || badge.contains(el)) return;
 
-    // Highlight element using layout-safe outline
+    // outline instead of border so we don't shift layout on hover
     el.dataset.kexariPrevOutline = el.style.outline;
     el.style.outline = '2px solid #6366f1';
     el.style.outlineOffset = '-2px';
 
-    // Extract React info to display on the badge
     const info = getReactInfo(el);
     const componentName = info?.componentName || el.tagName.toLowerCase();
     
     badge.textContent = componentName;
     badge.style.display = 'block';
 
-    // Position badge
     const rect = el.getBoundingClientRect();
     let top = rect.top - 24;
     let left = rect.left;
 
-    // Boundary checks
+    // keep the badge on screen when hovering near the top/left edge
     if (top < 5) {
       top = rect.top + 5;
     }
@@ -260,7 +251,6 @@
     badge.style.left = `${left}px`;
   }, true);
 
-  // Mouse out handler to remove highlight and hide badge
   document.addEventListener('mouseout', (e) => {
     const el = e.target;
     if (!el || el === badge) return;
@@ -275,13 +265,12 @@
     badge.style.display = 'none';
   }, true);
 
-  // Click handler to capture and send info
   document.addEventListener('click', (e) => {
     if (!inspectorEnabled) return;
     const el = e.target;
     if (!el || el === badge) return;
 
-    // Prevent navigation / submit
+    // we're intercepting the click to inspect the element, not to follow links or submit forms
     e.preventDefault();
     e.stopPropagation();
 
@@ -292,10 +281,10 @@
     const lineNumber = info?.lineNumber || 0;
     const tagName = el.tagName.toLowerCase();
     
-    // Safely parse SVGAnimatedString classNames (SVG elements) to avoid postMessage DataCloneError
+    // SVG elements expose className as an SVGAnimatedString, not a plain string,
+    // and that object can't be sent through postMessage
     const className = typeof el.className === 'string' ? el.className : (el.className?.baseVal || '');
 
-    // Send payload to parent VS Code Webview
     window.parent.postMessage({
       type: 'KEXARI_LENS_INSPECTOR_CLICK',
       payload: {
