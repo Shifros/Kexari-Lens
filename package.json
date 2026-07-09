@@ -4,6 +4,11 @@
   "description": "Visual element inspector and React context extractor for Next.js",
   "version": "0.1.0",
   "publisher": "shifros",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shifros/Kexari-Lens.git"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -24,6 +29,8 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "test:proxy": "npm run compile && node scripts/test-proxy.mjs",
+    "package": "npm run compile && vsce package",
     "lint": "eslint src --ext ts"
   },
   "dependencies": {
@@ -34,6 +41,7 @@
     "@types/vscode": "^1.85.0",
     "@types/node": "^20.11.0",
     "@types/express": "^4.17.21",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "@vscode/vsce": "^3.2.1"
   }
 }

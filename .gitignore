@@ -10,9 +10,20 @@ out/
 # Package files
 *.vsix
 
+# Environment / secrets
+.env
+.env.*
+
+# Logs
+*.log
+npm-debug.log*
+
 # Operating system files
 .DS_Store
 Thumbs.db
 
-# Markdown files
+# Internal planning notes (only effective after: git rm --cached Action.md)
 Action.md
+
+# Editor-specific
+.cursor/

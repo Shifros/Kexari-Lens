@@ -1,0 +1,10 @@
+.vscode/**
+.vscode-test/**
+.git/**
+**/*.ts
+**/*.map
+tsconfig.json
+scripts/**
+Action.md
+commit_message.txt
+commit.bat
