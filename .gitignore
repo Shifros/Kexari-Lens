@@ -13,3 +13,6 @@ out/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Markdown files
+Action.md
