@@ -22,136 +22,243 @@
     display: 'none',
     boxShadow: '0 2px 5px rgba(0,0,0,0.2)',
     fontWeight: 'bold',
-    transition: 'top 0.1s, left 0.1s'
+    transition: 'top 0.1s, left 0.1s',
+    maxWidth: 'min(420px, calc(100vw - 16px))',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap'
   });
   document.body.appendChild(badge);
 
+  function hideBadge() {
+    badge.style.display = 'none';
+  }
+
+  function showBadgeForElement(el) {
+    const landmark = getDomLandmark(el);
+    const info = getReactInfo(el, landmark);
+    const componentName = info?.componentName || el.tagName.toLowerCase();
+    const selectedCount = selection.length;
+
+    badge.textContent = selectedCount > 0
+      ? `${componentName}  ·  ${selectedCount} selected`
+      : componentName;
+    badge.style.display = 'block';
+
+    const rect = el.getBoundingClientRect();
+    let top = rect.top - 24;
+    let left = rect.left;
+
+    if (top < 5) {
+      top = rect.top + 5;
+    }
+    if (left < 5) {
+      left = 5;
+    }
+
+    badge.style.top = `${top}px`;
+    badge.style.left = `${left}px`;
+  }
+
+  function notifySelectionCleared() {
+    window.parent.postMessage({
+      type: 'KEXARI_LENS_SELECTION_CLEARED'
+    }, '*');
+  }
+
+
+  function isThirdPartyOrCompiled(filePath) {
+    if (!filePath) return true;
+    const lower = filePath.toLowerCase().replace(/\\/g, '/');
+    return (
+      lower.includes('node_modules') ||
+      lower.includes('next/dist') ||
+      lower.includes('/_next/') ||
+      lower.includes('_next/') ||
+      lower.includes('react-dom') ||
+      lower.includes('react-stack-top-frame') ||
+      lower.includes('kexari-inspector.js') ||
+      lower.includes('/static/chunks/') ||
+      /\/_?next\//.test(lower)
+    );
+  }
+
+  function looksLikeSourceFile(filePath) {
+    if (!filePath || isThirdPartyOrCompiled(filePath)) return false;
+    const lower = filePath.toLowerCase().replace(/\\/g, '/');
+    return (
+      /\.(tsx|jsx|ts|mts|cts)$/.test(lower) ||
+      lower.includes('/src/') ||
+      lower.includes('/app/') ||
+      lower.includes('/components/') ||
+      lower.includes('/pages/')
+    );
+  }
+
   // React 19 dropped _debugSource, but it still attaches an Error to each fiber
   // (_debugStack) captured at the point the JSX was written. We parse that stack
-  // to recover the file and line, same idea as _debugSource used to give us.
-  function parseStack(debugStack) {
-    if (!debugStack) return null;
+  // to recover the file, line, and column.
+  function parseAllStackFrames(debugStack) {
+    if (!debugStack) return [];
     let stack = '';
     if (typeof debugStack === 'string') {
       stack = debugStack;
     } else if (debugStack.stack) {
       stack = debugStack.stack;
     } else {
-      return null;
+      return [];
     }
 
+    const frames = [];
     const lines = stack.split('\n');
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
-      const match = line.match(/at\s+(?:(?:\s|\w|\$|<|>|\[|\]|\.)+\s+)?\((?:webpack-internal:\/\/\/\(.*\)\/|http:\/\/localhost:\d+\/|file:\/\/+)?([^?)]+)(?:\?[^)]*)?:(\d+):(\d+)\)/) ||
-                    line.match(/at\s+(?:webpack-internal:\/\/\/\(.*\)\/|http:\/\/localhost:\d+\/|file:\/\/+)?([^?:\s)]+)(?:\?[^:\s)]*)?:(\d+):(\d+)/);
-      
-      if (match) {
-        let filePath = match[1];
-        const lineNum = parseInt(match[2], 10);
-        filePath = filePath.replace(/\\/g, '/');
+      const match =
+        line.match(/at\s+(?:.+?\s+)?\((.+?):(\d+):(\d+)\)/) ||
+        line.match(/at\s+(.+?):(\d+):(\d+)/);
 
-        const lowerPath = filePath.toLowerCase();
-        if (lowerPath.includes('node_modules') || 
-            lowerPath.includes('next/dist') || 
-            lowerPath.includes('react-dom') || 
-            lowerPath.includes('react-stack-top-frame') ||
-            lowerPath.includes('kexari-inspector.js')) {
-          continue;
-        }
+      if (!match) continue;
 
-        filePath = filePath.replace(/^webpack-internal:\/\/\/\([^)]+\)\//, '');
-        filePath = filePath.replace(/^\.\//, '');
-        filePath = filePath.replace(/^file:\/\/\//, '');
-        filePath = filePath.replace(/^http:\/\/localhost:\d+\//, '');
+      let filePath = match[1];
+      const lineNum = parseInt(match[2], 10);
+      const columnNum = parseInt(match[3], 10);
 
-        return {
-          fileName: filePath,
-          lineNumber: lineNum
-        };
+      filePath = filePath.replace(/\\/g, '/');
+      filePath = filePath.replace(/^webpack-internal:\/\/\/\([^)]+\)\//, '');
+      filePath = filePath.replace(/^\.\//, '');
+      filePath = filePath.replace(/^file:\/\/\//, '');
+      filePath = filePath.replace(/^https?:\/\/[^/]+\//, '');
+      // strip query strings from turbopack/webpack urls
+      filePath = filePath.replace(/\?.*$/, '');
+
+      if (
+        filePath.includes('react-stack-top-frame') ||
+        filePath.includes('kexari-inspector.js') ||
+        filePath.includes('react-dom')
+      ) {
+        continue;
       }
+
+      frames.push({
+        fileName: filePath,
+        lineNumber: lineNum,
+        columnNumber: columnNum
+      });
     }
-    return null;
+    return frames;
+  }
+
+  function pickBestFrame(frames) {
+    if (!frames || frames.length === 0) return null;
+    const source = frames.find((f) => looksLikeSourceFile(f.fileName));
+    if (source) return source;
+    const nonCompiled = frames.find((f) => !isThirdPartyOrCompiled(f.fileName));
+    if (nonCompiled) return nonCompiled;
+    return frames[0];
   }
 
   // Walks up the fiber tree from a DOM node looking for the nearest named
-  // component and its source location. We keep a separate "fallback" result
-  // for anything that resolves into node_modules, since we'd rather show the
-  // user's own component than a UI library wrapper if one is available.
-  function getReactInfo(element) {
-    const key = Object.keys(element).find(k => k.startsWith('__reactFiber$'));
+  // component and its source location. We keep compiled chunk frames separately
+  // so the extension can resolve them via source maps.
+  function getReactInfo(element, landmark) {
+    const key = Object.keys(element).find((k) => k.startsWith('__reactFiber$'));
     if (!key) return null;
 
     let fiber = element[key];
-    
-    let userComponentName = null;
-    let userFileName = null;
-    let userLineNumber = null;
+
+    const owners = [];
+    const stackFrames = [];
+    const seenKeys = new Set();
 
     let fallbackComponentName = null;
     let fallbackFileName = null;
     let fallbackLineNumber = null;
+    let fallbackColumnNumber = null;
 
     while (fiber) {
       let fiberFile = null;
       let fiberLine = null;
+      let fiberColumn = null;
 
       if (fiber._debugSource) {
         fiberFile = fiber._debugSource.fileName;
         fiberLine = fiber._debugSource.lineNumber;
+        fiberColumn = fiber._debugSource.columnNumber || 0;
+        if (fiberFile) {
+          const frameKey = fiberFile + ':' + fiberLine + ':' + fiberColumn;
+          if (!seenKeys.has(frameKey)) {
+            seenKeys.add(frameKey);
+            stackFrames.push({
+              fileName: String(fiberFile).replace(/\\/g, '/'),
+              lineNumber: fiberLine,
+              columnNumber: fiberColumn
+            });
+          }
+        }
       } else if (fiber._debugStack) {
-        const stackInfo = parseStack(fiber._debugStack);
-        if (stackInfo) {
-          fiberFile = stackInfo.fileName;
-          fiberLine = stackInfo.lineNumber;
+        const frames = parseAllStackFrames(fiber._debugStack);
+        for (const frame of frames) {
+          const frameKey = frame.fileName + ':' + frame.lineNumber + ':' + frame.columnNumber;
+          if (!seenKeys.has(frameKey)) {
+            seenKeys.add(frameKey);
+            stackFrames.push(frame);
+          }
+        }
+        const best = pickBestFrame(frames);
+        if (best) {
+          fiberFile = best.fileName;
+          fiberLine = best.lineNumber;
+          fiberColumn = best.columnNumber;
         }
       }
 
       if (fiberFile) {
-        fiberFile = fiberFile.replace(/\\/g, '/');
-        const isNodeModule = fiberFile.toLowerCase().includes('node_modules') || fiberFile.toLowerCase().includes('next/dist');
-        
-        if (!isNodeModule) {
-          if (!userFileName) {
-            userFileName = fiberFile;
-            userLineNumber = fiberLine;
-          }
-        } else {
-          if (!fallbackFileName) {
-            fallbackFileName = fiberFile;
-            fallbackLineNumber = fiberLine;
-          }
-        }
+        fiberFile = String(fiberFile).replace(/\\/g, '/');
       }
 
+      let name = null;
       if (fiber.type) {
-        let name = null;
         if (typeof fiber.type === 'function') {
           name = fiber.type.name || fiber.type.displayName;
         } else if (typeof fiber.type === 'object') {
           name = fiber.type.displayName || fiber.type.name || fiber.type.render?.name;
         }
+      }
 
-        if (name && name[0] === name[0].toUpperCase()) {
-          const ignoredNames = [
-            'Root', 'App', 'Layout', 'ServerRoot', 'Outer', 'Provider', 'Connect', 'Link', 'Image', 'html', 'body', 'Route', 'Router', 'Redirect', 'Switch',
-            'NextFiber', 'StaticGenerationSearchParamsBypassProvider', 'AppRouterHeadersProvider',
-            'MotionDOMComponent', 'AnimatePresence', 'LazyMotion', 'motion', 'Motion', 'PresenceChild',
-            'Slot', 'Primitive', 'SlotChild', 'ForwardRef', 'Consumer', 'Context',
-            'ClientPageRoot', 'ClientRoot', 'HotReload', 'Webpack', 'Next', 'Server', 'StaticGroup', 'OuterLayoutRouter'
-          ];
-          if (!ignoredNames.includes(name) && !name.startsWith('Next') && !name.startsWith('Webpack') && !name.startsWith('HotReload')) {
-            const isNodeModule = fiberFile && (fiberFile.toLowerCase().includes('node_modules') || fiberFile.toLowerCase().includes('next/dist'));
-            
-            if (!isNodeModule) {
-              if (!userComponentName) {
-                userComponentName = name;
-              }
-            } else {
-              if (!fallbackComponentName) {
-                fallbackComponentName = name;
-              }
-            }
+      if (name && name[0] === name[0].toUpperCase()) {
+        const ignoredNames = [
+          'Root', 'App', 'Layout', 'ServerRoot', 'Outer', 'Provider', 'Connect', 'Link', 'Image', 'html', 'body', 'Route', 'Router', 'Redirect', 'Switch',
+          'NextFiber', 'StaticGenerationSearchParamsBypassProvider', 'AppRouterHeadersProvider',
+          'MotionDOMComponent', 'AnimatePresence', 'LazyMotion', 'motion', 'Motion', 'PresenceChild',
+          'Slot', 'Primitive', 'SlotChild', 'ForwardRef', 'Consumer', 'Context',
+          'ClientPageRoot', 'ClientRoot', 'HotReload', 'Webpack', 'Next', 'Server', 'StaticGroup', 'OuterLayoutRouter'
+        ];
+        if (
+          !ignoredNames.includes(name) &&
+          !name.startsWith('Next') &&
+          !name.startsWith('Webpack') &&
+          !name.startsWith('HotReload')
+        ) {
+          const isBad = fiberFile && isThirdPartyOrCompiled(fiberFile);
+          if (!isBad && fiberFile && looksLikeSourceFile(fiberFile)) {
+            owners.push({
+              componentName: name,
+              fileName: fiberFile,
+              lineNumber: fiberLine,
+              columnNumber: fiberColumn || 0
+            });
+          } else if (!isBad && !owners.length && fiberFile) {
+            owners.push({
+              componentName: name,
+              fileName: fiberFile,
+              lineNumber: fiberLine,
+              columnNumber: fiberColumn || 0
+            });
+          } else if (isBad && !fallbackComponentName) {
+            fallbackComponentName = name;
+            fallbackFileName = fiberFile;
+            fallbackLineNumber = fiberLine;
+            fallbackColumnNumber = fiberColumn;
           }
         }
       }
@@ -159,11 +266,91 @@
       fiber = fiber.return;
     }
 
+    const picked = pickBestOwner(owners, landmark);
+    const bestOverall = pickBestFrame(stackFrames);
+
     return {
-      componentName: userComponentName || fallbackComponentName || null,
-      fileName: userFileName || fallbackFileName || null,
-      lineNumber: userLineNumber || fallbackLineNumber || null
+      componentName: picked?.componentName || fallbackComponentName || null,
+      fileName: picked?.fileName || bestOverall?.fileName || fallbackFileName || null,
+      lineNumber: picked?.lineNumber || bestOverall?.lineNumber || fallbackLineNumber || null,
+      columnNumber: picked?.columnNumber || bestOverall?.columnNumber || fallbackColumnNumber || 0,
+      stackFrames: stackFrames.slice(0, 12),
+      owners: owners.slice(0, 8).map((o) => ({
+        componentName: o.componentName,
+        fileName: o.fileName,
+        lineNumber: o.lineNumber
+      }))
     };
+  }
+
+  function pickBestOwner(owners, landmark) {
+    if (!owners || owners.length === 0) return null;
+
+    const scored = owners.map((owner, index) => {
+      // Closer owners (near the clicked node) rank higher by default.
+      let score = Math.max(0, 40 - index * 4);
+      const name = String(owner.componentName || '').toLowerCase();
+      const file = String(owner.fileName || '').toLowerCase().replace(/\\/g, '/');
+
+      if (landmark === 'header' || landmark === 'nav') {
+        if (/header|navbar|nav\b|topbar|siteheader|sitenav/.test(name)) score += 60;
+        if (/header|navbar|nav|topbar/.test(file)) score += 40;
+        if (/hero|homepage|home-page|landing/.test(name)) score -= 50;
+        if (/hero|homepage|home-page/.test(file)) score -= 35;
+        if (/(^|\/)page\.(tsx|jsx|ts|js)$/.test(file) || /\/page\./.test(file)) score -= 25;
+      } else if (landmark === 'footer') {
+        if (/footer|sitefooter/.test(name) || /footer/.test(file)) score += 60;
+      } else if (landmark === 'main') {
+        if (/hero|homepage|home\b|landing|page\b/.test(name)) score += 15;
+      }
+
+      // Generic shared atoms are weak owners when a section component exists above.
+      if (/^(button|btn|cta|link|anchor)$/i.test(name)) score -= 20;
+
+      return { owner, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    return scored[0].owner;
+  }
+
+  function getDomLandmark(el) {
+    let node = el;
+    for (let i = 0; i < 12 && node; i++) {
+      const tag = (node.tagName || '').toLowerCase();
+      if (tag === 'header' || tag === 'nav' || tag === 'footer' || tag === 'main' || tag === 'aside') {
+        return tag;
+      }
+      const role = (node.getAttribute && node.getAttribute('role')) || '';
+      if (role === 'banner') return 'header';
+      if (role === 'navigation') return 'nav';
+      if (role === 'contentinfo') return 'footer';
+      if (role === 'main') return 'main';
+
+      const idClass = `${node.id || ''} ${typeof node.className === 'string' ? node.className : ''}`.toLowerCase();
+      if (/\bheader\b|\bsite-header\b|\btopbar\b/.test(idClass)) return 'header';
+      if (/\bnavbar\b|\bsite-nav\b/.test(idClass)) return 'nav';
+      if (/\bfooter\b|\bsite-footer\b/.test(idClass)) return 'footer';
+      if (/\bhero\b/.test(idClass)) return 'main';
+
+      node = node.parentElement;
+    }
+    return '';
+  }
+
+  function getTextOccurrenceIndex(el, text) {
+    if (!text) return 0;
+    const tag = (el.tagName || '').toLowerCase();
+    const matches = [];
+    const nodes = document.body ? document.body.querySelectorAll(tag || '*') : [];
+    for (let i = 0; i < nodes.length; i++) {
+      const node = nodes[i];
+      if (extractVisibleText(node) === text) {
+        matches.push(node);
+      }
+    }
+    const index = matches.indexOf(el);
+    return index >= 0 ? index : 0;
   }
 
   function reportUrlChange() {
@@ -200,7 +387,9 @@
       if (msg.type === 'KEXARI_LENS_SET_STATE') {
         inspectorEnabled = msg.enabled;
         if (!inspectorEnabled) {
-          badge.style.display = 'none';
+          hideBadge();
+          clearSelection();
+          notifySelectionCleared();
           const activeEl = document.querySelector('[data-kexari-prev-outline]');
           if (activeEl) {
             activeEl.style.outline = activeEl.dataset.kexariPrevOutline || '';
@@ -219,50 +408,146 @@
     }
   });
 
+  // Multi-select state. Shift+Click toggles elements into this list.
+  // Cyan outline = locked in. Esc or a normal click resets.
+  const selection = [];
+
+  function markSelected(el) {
+    el.dataset.kexariSelected = '1';
+    el.style.outline = '2px solid #22d3ee';
+    el.style.outlineOffset = '-2px';
+  }
+
+  function unmarkSelected(el) {
+    delete el.dataset.kexariSelected;
+    el.style.outline = '';
+    el.style.outlineOffset = '';
+  }
+
+  function clearSelection() {
+    for (const item of selection) {
+      unmarkSelected(item.el);
+    }
+    selection.length = 0;
+  }
+
+  // Matches Tailwind's default breakpoints so the AI knows which screen
+  // the user is looking at, and which responsive prefixes to leave alone.
+  function getViewportInfo() {
+    const width = window.innerWidth || document.documentElement.clientWidth || 0;
+    const height = window.innerHeight || document.documentElement.clientHeight || 0;
+
+    let label = 'Desktop';
+    if (width < 640) {
+      label = 'Mobile';
+    } else if (width < 768) {
+      label = 'Small';
+    } else if (width < 1024) {
+      label = 'Tablet';
+    } else if (width < 1280) {
+      label = 'Desktop';
+    } else {
+      label = 'Large Desktop';
+    }
+
+    return {
+      width,
+      height,
+      label,
+      summary: `${width}px (${label})`
+    };
+  }
+
+  // Visible copy the user can edit — titles, paragraphs, labels, etc.
+  // Prefer direct text nodes so parent wrappers don't swallow every child line.
+  function extractVisibleText(el) {
+    if (!el) return '';
+
+    const tag = el.tagName ? el.tagName.toLowerCase() : '';
+    if (tag === 'input' || tag === 'textarea') {
+      return String(el.value || el.getAttribute('placeholder') || '').replace(/\s+/g, ' ').trim();
+    }
+    if (tag === 'img') {
+      return String(el.getAttribute('alt') || '').replace(/\s+/g, ' ').trim();
+    }
+
+    const directParts = [];
+    if (el.childNodes && el.childNodes.length) {
+      for (let i = 0; i < el.childNodes.length; i++) {
+        const node = el.childNodes[i];
+        if (node.nodeType === 3) {
+          const part = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+          if (part) directParts.push(part);
+        }
+      }
+    }
+
+    let text = directParts.length
+      ? directParts.join(' ')
+      : String(el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+
+    if (text.length > 240) {
+      text = text.slice(0, 240).trim();
+    }
+
+    return text;
+  }
+
+  function buildTargetPayload(el) {
+    const landmark = getDomLandmark(el);
+    const info = getReactInfo(el, landmark);
+    const className = typeof el.className === 'string'
+      ? el.className
+      : (el.className?.baseVal || '');
+    const text = extractVisibleText(el);
+
+    return {
+      componentName: info?.componentName || 'Unknown',
+      fileName: info?.fileName || 'Unknown',
+      lineNumber: info?.lineNumber || 0,
+      columnNumber: info?.columnNumber || 0,
+      tagName: el.tagName.toLowerCase(),
+      className,
+      text,
+      landmark: landmark || '',
+      textIndex: getTextOccurrenceIndex(el, text),
+      owners: info?.owners || [],
+      stackFrames: info?.stackFrames || []
+    };
+  }
+
   document.addEventListener('mouseover', (e) => {
     if (!inspectorEnabled) return;
     const el = e.target;
-    if (!el || el === badge || badge.contains(el)) return;
+    if (!el || el === badge) return;
 
-    // outline instead of border so we don't shift layout on hover
-    el.dataset.kexariPrevOutline = el.style.outline;
-    el.style.outline = '2px solid #6366f1';
-    el.style.outlineOffset = '-2px';
-
-    const info = getReactInfo(el);
-    const componentName = info?.componentName || el.tagName.toLowerCase();
-    
-    badge.textContent = componentName;
-    badge.style.display = 'block';
-
-    const rect = el.getBoundingClientRect();
-    let top = rect.top - 24;
-    let left = rect.left;
-
-    // keep the badge on screen when hovering near the top/left edge
-    if (top < 5) {
-      top = rect.top + 5;
+    // don't fight the persistent selection outline
+    if (!el.dataset.kexariSelected) {
+      el.dataset.kexariPrevOutline = el.style.outline;
+      el.style.outline = '2px solid #6366f1';
+      el.style.outlineOffset = '-2px';
     }
-    if (left < 5) {
-      left = 5;
-    }
-    
-    badge.style.top = `${top}px`;
-    badge.style.left = `${left}px`;
+
+    showBadgeForElement(el);
   }, true);
 
   document.addEventListener('mouseout', (e) => {
     const el = e.target;
     if (!el || el === badge) return;
 
-    if (el.dataset && 'kexariPrevOutline' in el.dataset) {
+    if (el.dataset && el.dataset.kexariSelected) {
+      // keep the cyan selection outline
+      el.style.outline = '2px solid #22d3ee';
+      el.style.outlineOffset = '-2px';
+      delete el.dataset.kexariPrevOutline;
+    } else if (el.dataset && 'kexariPrevOutline' in el.dataset) {
       el.style.outline = el.dataset.kexariPrevOutline || '';
       delete el.dataset.kexariPrevOutline;
     } else {
       el.style.outline = '';
     }
 
-    badge.style.display = 'none';
+    hideBadge();
   }, true);
 
   document.addEventListener('click', (e) => {
@@ -270,30 +555,69 @@
     const el = e.target;
     if (!el || el === badge) return;
 
-    // we're intercepting the click to inspect the element, not to follow links or submit forms
     e.preventDefault();
     e.stopPropagation();
 
-    const info = getReactInfo(el);
-    
-    const componentName = info?.componentName || 'Unknown';
-    const fileName = info?.fileName || 'Unknown';
-    const lineNumber = info?.lineNumber || 0;
-    const tagName = el.tagName.toLowerCase();
-    
-    // SVG elements expose className as an SVGAnimatedString, not a plain string,
-    // and that object can't be sent through postMessage
-    const className = typeof el.className === 'string' ? el.className : (el.className?.baseVal || '');
+    const payload = buildTargetPayload(el);
+
+    // Shift+Click: add/remove from a multi-selection set
+    if (e.shiftKey) {
+      const existingIndex = selection.findIndex((item) => item.el === el);
+
+      if (existingIndex >= 0) {
+        unmarkSelected(selection[existingIndex].el);
+        selection.splice(existingIndex, 1);
+      } else {
+        markSelected(el);
+        selection.push({ el, payload });
+      }
+
+      if (selection.length === 0) {
+        hideBadge();
+        notifySelectionCleared();
+        return;
+      }
+
+      showBadgeForElement(el);
+
+      // Code button only targets the last selected element
+      const jumpTarget = selection[selection.length - 1].payload;
+
+      window.parent.postMessage({
+        type: 'KEXARI_LENS_INSPECTOR_CLICK',
+        payload: {
+          mode: 'multi',
+          viewport: getViewportInfo(),
+          targets: selection.map((item) => item.payload),
+          jumpTarget
+        }
+      }, '*');
+      return;
+    }
+
+    // Normal click: replace selection with this one element
+    clearSelection();
+    markSelected(el);
+    selection.push({ el, payload });
+    showBadgeForElement(el);
 
     window.parent.postMessage({
       type: 'KEXARI_LENS_INSPECTOR_CLICK',
       payload: {
-        componentName,
-        fileName,
-        lineNumber,
-        tagName,
-        className
+        mode: 'single',
+        viewport: getViewportInfo(),
+        targets: [payload],
+        jumpTarget: payload
       }
     }, '*');
+  }, true);
+
+  document.addEventListener('keydown', (e) => {
+    if (!inspectorEnabled) return;
+    if (e.key === 'Escape') {
+      clearSelection();
+      hideBadge();
+      notifySelectionCleared();
+    }
   }, true);
 })();

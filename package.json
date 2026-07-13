@@ -2,7 +2,7 @@
   "name": "kexari-lens",
   "displayName": "Kexari Lens",
   "description": "Visual element inspector and React context extractor for Next.js",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "shifros",
   "license": "MIT",
   "repository": {
@@ -35,13 +35,15 @@
   },
   "dependencies": {
     "express": "^4.19.2",
-    "http-proxy-middleware": "^3.0.0"
+    "http-proxy-middleware": "^3.0.0",
+    "source-map": "^0.7.6"
   },
   "devDependencies": {
-    "@types/vscode": "^1.85.0",
-    "@types/node": "^20.11.0",
     "@types/express": "^4.17.21",
-    "typescript": "^5.3.3",
-    "@vscode/vsce": "^3.2.1"
+    "@types/node": "^20.11.0",
+    "@types/source-map": "^0.5.2",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.3.3"
   }
 }
