@@ -5,9 +5,16 @@ import * as fs from 'fs';
 
 export interface ProxyServerInstance {
   server: http.Server;
+  /** Actual bound port — may differ from the requested port when 0 (auto-assign) is passed. */
+  port: number;
   close: () => Promise<void>;
 }
 
+/**
+ * Starts a proxy server for one dev-server target. Pass port 0 to let the OS
+ * assign a free port, which is what allows multiple targets/projects to run
+ * side by side without colliding on a fixed port.
+ */
 export function startProxyServer(
   port: number,
   targetUrl: string,
@@ -69,8 +76,11 @@ export function startProxyServer(
     });
 
     server.listen(port, () => {
+      const address = server.address();
+      const boundPort = address && typeof address === 'object' ? address.port : port;
       resolve({
         server,
+        port: boundPort,
         close: () => {
           return new Promise<void>((resolveClose) => {
             server.close(() => {
