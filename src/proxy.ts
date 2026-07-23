@@ -55,10 +55,48 @@ export function startProxyServer(
         error: (err, req, res) => {
           console.error('[Kexari Lens Proxy Error]:', err);
           if (res && 'writeHead' in res && typeof res.writeHead === 'function') {
-            const httpRes = res as any;
+            const httpRes = res as http.ServerResponse;
             if (!httpRes.headersSent) {
-              httpRes.writeHead(502, { 'Content-Type': 'text/plain' });
-              httpRes.end(`Kexari Lens Proxy Error: Could not connect to Next.js dev server at ${targetUrl}. Is it running?\n\nError: ${err.message}`);
+              // Waiting page with auto-retry — covers compile-time and late `npm run dev`.
+              const safeTarget = String(targetUrl)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/"/g, '&quot;');
+              const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="refresh" content="2" />
+  <title>Waiting for app…</title>
+  <style>
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+      font-family: system-ui, sans-serif; background: #0f1115; color: #c8cdd8; }
+    .box { text-align: center; max-width: 28rem; padding: 1.5rem; }
+    h1 { font-size: 1.05rem; font-weight: 600; color: #e8ebf2; margin: 0 0 .5rem; }
+    p { margin: 0; font-size: .85rem; line-height: 1.45; opacity: .85; }
+    code { font-size: .8rem; color: #9db4ff; }
+    .dot { display: inline-block; width: .45rem; height: .45rem; margin: 0 .15rem;
+      border-radius: 50%; background: #6b8cff; animation: pulse 1.2s infinite ease-in-out; }
+    .dot:nth-child(2) { animation-delay: .2s; }
+    .dot:nth-child(3) { animation-delay: .4s; }
+    @keyframes pulse { 0%, 80%, 100% { opacity: .25; transform: scale(.85); }
+      40% { opacity: 1; transform: scale(1); } }
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div style="margin-bottom:1rem"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+    <h1>Waiting for your app</h1>
+    <p>Cannot reach <code>${safeTarget}</code> yet (still compiling or not started). This page retries every 2s.</p>
+  </div>
+  <script>setTimeout(function () { location.reload(); }, 2000);</script>
+</body>
+</html>`;
+              httpRes.writeHead(502, {
+                'Content-Type': 'text/html; charset=utf-8',
+                'Cache-Control': 'no-store'
+              });
+              httpRes.end(html);
             }
           } else if (res && 'destroy' in res && typeof (res as any).destroy === 'function') {
             (res as any).destroy();

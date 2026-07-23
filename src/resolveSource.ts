@@ -1,8 +1,5 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
-import * as http from 'http';
-import * as fs from 'fs';
-import { SourceMapConsumer } from 'source-map';
 
 export interface StackFrame {
   fileName: string;
@@ -17,21 +14,6 @@ export interface ResolvedSource {
 
 const SOURCE_EXTENSIONS = ['.tsx', '.jsx', '.ts', '.js', '.mts', '.cts'];
 
-let sourceMapReady: Promise<void> | null = null;
-
-function ensureSourceMapReady(): Promise<void> {
-  if (!sourceMapReady) {
-    sourceMapReady = (async () => {
-      const wasmPath = require.resolve('source-map/lib/mappings.wasm');
-      const wasmBuffer = fs.readFileSync(wasmPath);
-      (SourceMapConsumer as any).initialize({
-        'lib/mappings.wasm': wasmBuffer
-      });
-    })();
-  }
-  return sourceMapReady;
-}
-
 export function isUnusablePath(filePath?: string | null): boolean {
   if (!filePath || filePath === 'Unknown') {
     return true;
@@ -45,7 +27,7 @@ export function isUnusablePath(filePath?: string | null): boolean {
     lower.includes('_next/') ||
     lower.includes('/static/chunks/') ||
     lower.includes('react-dom') ||
-    /\.js(\?|$)/.test(lower) && (lower.includes('chunk') || lower.includes('_next'))
+    (/\.js(\?|$)/.test(lower) && (lower.includes('chunk') || lower.includes('_next')))
   );
 }
 
@@ -61,7 +43,6 @@ function normalizeSourcePath(sourcePath: string): string {
   cleaned = cleaned.replace(/^\.\//, '');
   cleaned = cleaned.replace(/\?.*$/, '');
 
-  // Drop leading absolute drive letters that aren't local, keep Windows paths
   if (/^[a-zA-Z]:\//.test(cleaned)) {
     return cleaned;
   }
@@ -82,97 +63,6 @@ function looksLikeProjectSource(filePath: string): boolean {
     lower.includes('/components/') ||
     lower.includes('/pages/')
   );
-}
-
-async function fetchText(url: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const req = http.get(url, (res) => {
-      if (res.statusCode && res.statusCode >= 400) {
-        res.resume();
-        resolve(null);
-        return;
-      }
-
-      const chunks: Buffer[] = [];
-      res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
-      res.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
-    });
-
-    req.on('error', () => resolve(null));
-    req.setTimeout(2500, () => {
-      req.destroy();
-      resolve(null);
-    });
-  });
-}
-
-function toMapUrl(chunkPath: string, proxyBaseUrl: string): string {
-  let relative = chunkPath.replace(/\\/g, '/');
-  relative = relative.replace(/^https?:\/\/[^/]+\//, '');
-  if (!relative.startsWith('/')) {
-    relative = '/' + relative;
-  }
-  if (!relative.endsWith('.map')) {
-    relative = relative + '.map';
-  }
-  return proxyBaseUrl.replace(/\/$/, '') + relative;
-}
-
-async function resolveViaSourceMap(
-  frame: StackFrame,
-  proxyBaseUrl: string
-): Promise<ResolvedSource | null> {
-  if (!frame.fileName || !frame.lineNumber) {
-    return null;
-  }
-
-  // Only try source maps for compiled/chunk paths
-  const lower = frame.fileName.toLowerCase().replace(/\\/g, '/');
-  const shouldTryMap =
-    lower.includes('_next/') ||
-    lower.includes('/static/chunks/') ||
-    lower.endsWith('.js') ||
-    lower.includes('chunk');
-
-  if (!shouldTryMap) {
-    return null;
-  }
-
-  const mapUrl = toMapUrl(frame.fileName, proxyBaseUrl);
-  const mapText = await fetchText(mapUrl);
-  if (!mapText) {
-    return null;
-  }
-
-  try {
-    await ensureSourceMapReady();
-    const rawMap = JSON.parse(mapText);
-    const consumer = await new SourceMapConsumer(rawMap);
-    try {
-      const original = consumer.originalPositionFor({
-        line: frame.lineNumber,
-        column: Math.max(0, (frame.columnNumber || 1) - 1)
-      });
-
-      if (!original.source || original.line == null) {
-        return null;
-      }
-
-      const normalized = normalizeSourcePath(original.source);
-      if (!looksLikeProjectSource(normalized) && isUnusablePath(normalized)) {
-        return null;
-      }
-
-      return {
-        filePath: normalized,
-        lineNumber: original.line
-      };
-    } finally {
-      consumer.destroy();
-    }
-  } catch {
-    return null;
-  }
 }
 
 async function mapToWorkspaceFile(candidatePath: string): Promise<string | null> {
@@ -206,7 +96,7 @@ async function mapToWorkspaceFile(candidatePath: string): Promise<string | null>
     }
   }
 
-  // Search by basename under src/app/components etc.
+  // Search by basename under the workspace (skip build outputs)
   const exclude = '**/{node_modules,.next,.git,dist,out,build,.turbo}/**';
   const matches = await vscode.workspace.findFiles(`**/${basename}`, exclude, 40);
   if (matches.length === 0) {
@@ -234,11 +124,9 @@ async function mapToWorkspaceFile(candidatePath: string): Promise<string | null>
 }
 
 /**
- * Two-step resolution — no workspace-wide text search, ever:
- * 1. Prefer an already-good source path (mapped to a real file on disk)
- * 2. Resolve compiled chunk frames via source maps (webpack/turbopack → original files)
- * Never returns _next/ or node_modules paths. Returns Unknown if neither step succeeds,
- * so Code stays disabled rather than guessing.
+ * Resolve an inspected element to a workspace file.
+ * Primary input is compile-time `data-kexari-source` (file:line from @kexari-lens/dev).
+ * Chunk / source-map fallbacks were removed — React 19 made them unreliable.
  */
 export async function resolveInspectedSource(options: {
   componentName: string;
@@ -246,17 +134,10 @@ export async function resolveInspectedSource(options: {
   lineNumber?: number;
   columnNumber?: number;
   stackFrames?: StackFrame[];
-  proxyBaseUrl: string;
+  proxyBaseUrl?: string;
 }): Promise<ResolvedSource> {
-  const {
-    fileName,
-    lineNumber = 0,
-    columnNumber = 0,
-    stackFrames = [],
-    proxyBaseUrl
-  } = options;
+  const { fileName, lineNumber = 0 } = options;
 
-  // 1. Direct usable path
   if (fileName && !isUnusablePath(fileName)) {
     const mapped = await mapToWorkspaceFile(fileName);
     if (mapped) {
@@ -274,42 +155,6 @@ export async function resolveInspectedSource(options: {
     }
   }
 
-  // 2. Source-map every available stack frame (compiled chunks → original files)
-  const framesToTry: StackFrame[] = [
-    ...stackFrames,
-    ...(fileName
-      ? [{ fileName, lineNumber: lineNumber || 1, columnNumber: columnNumber || 0 }]
-      : [])
-  ];
-
-  const seen = new Set<string>();
-  for (const frame of framesToTry) {
-    const key = `${frame.fileName}:${frame.lineNumber}:${frame.columnNumber || 0}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
-
-    const mapped = await resolveViaSourceMap(frame, proxyBaseUrl);
-    if (!mapped) {
-      continue;
-    }
-
-    const workspaceFile = await mapToWorkspaceFile(mapped.filePath);
-    if (workspaceFile) {
-      return {
-        filePath: workspaceFile,
-        lineNumber: mapped.lineNumber
-      };
-    }
-
-    if (looksLikeProjectSource(mapped.filePath)) {
-      return mapped;
-    }
-  }
-
-  // 3. Unresolved — never leak chunk paths, and never fall back to a project-wide
-  // text search that could land on the wrong component.
   return {
     filePath: 'Unknown',
     lineNumber: 0

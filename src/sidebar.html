@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kexari Lens Sidebar</title>
+    <style>
+        html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: var(--vscode-sideBar-background, #18181c); font-family: var(--vscode-font-family); color: var(--vscode-foreground, #e2e8f0); font-size: 12px; display: flex; flex-direction: column; }
+        .sidebar-content { display: flex; flex-direction: column; padding: 12px; gap: 10px; flex: 1; overflow-y: auto; }
+        .section { display: flex; flex-direction: column; gap: 6px; }
+        .section-label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--vscode-descriptionForeground, #94a3b8); padding: 0 2px; }
+        input[type="text"] { background-color: var(--vscode-input-background, rgba(0,0,0,.2)); border: 1px solid var(--vscode-input-border, rgba(255,255,255,.08)); color: var(--vscode-input-foreground, #e2e8f0); padding: 6px 10px; border-radius: 6px; font-size: 11px; font-family: monospace; outline: none; transition: border-color .2s; width: 100%; box-sizing: border-box; }
+        input[type="text"]:focus { border-color: #6366f1; box-shadow: 0 0 0 1px rgba(99,102,241,.3); }
+        .btn { display: flex; align-items: center; justify-content: center; gap: 6px; padding: 7px 14px; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600; letter-spacing: .3px; border: 1px solid transparent; transition: all .2s; box-sizing: border-box; width: 100%; }
+        .btn-primary { background: linear-gradient(135deg, rgba(99,102,241,.85), rgba(129,140,248,.85)); border-color: rgba(99,102,241,.4); color: #fff; box-shadow: 0 2px 8px rgba(99,102,241,.25); }
+        .btn-primary:hover:not(:disabled) { background: linear-gradient(135deg, rgba(99,102,241,.95), rgba(129,140,248,.95)); }
+        .btn-primary:disabled { opacity: .4; cursor: not-allowed; box-shadow: none; }
+        .quick-chips { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+        .quick-chip { padding: 3px 8px; border-radius: 12px; font-size: 10px; font-weight: 600; cursor: pointer; border: 1px solid rgba(255,255,255,.08); background: rgba(255,255,255,.03); color: #94a3b8; transition: all .15s; white-space: nowrap; }
+        .quick-chip:hover { background: rgba(99,102,241,.12); border-color: rgba(99,102,241,.3); color: #a5b4fc; }
+        .divider { border: none; border-top: 1px solid rgba(255,255,255,.06); margin: 2px 0; }
+        .session-list { display: flex; flex-direction: column; gap: 6px; }
+        .session-card { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background-color: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.05); transition: border-color .2s; }
+        .session-card:hover { border-color: rgba(255,255,255,.1); }
+        .session-header { display: flex; align-items: center; gap: 6px; }
+        .session-dot { width: 7px; height: 7px; border-radius: 50%; background-color: #10b981; box-shadow: 0 0 6px rgba(16,185,129,.5); flex-shrink: 0; }
+        .session-dot.error { background-color: #ef4444; box-shadow: 0 0 6px rgba(239,68,68,.5); }
+        .session-name { font-weight: 600; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .session-actions { display: flex; gap: 6px; }
+        .btn-sm { flex: 1; display: flex; align-items: center; justify-content: center; gap: 4px; padding: 4px 8px; border-radius: 5px; cursor: pointer; font-size: 10px; font-weight: 600; letter-spacing: .2px; border: 1px solid transparent; transition: all .2s; text-transform: uppercase; }
+        .btn-focus { background: rgba(99,102,241,.1); border-color: rgba(99,102,241,.2); color: #a5b4fc; }
+        .btn-focus:hover { background: rgba(99,102,241,.18); color: #c7d2fe; }
+        .btn-stop { background: rgba(239,68,68,.1); border-color: rgba(239,68,68,.2); color: #fca5a5; }
+        .btn-stop:hover { background: rgba(239,68,68,.18); color: #fecaca; }
+        .empty-state { font-size: 11px; color: #64748b; text-align: center; padding: 16px 8px; line-height: 1.5; }
+        /* CSS Inspector section */
+        #css-section { display: none; flex-direction: column; gap: 6px; }
+        #css-section.visible { display: flex; }
+        .css-chip { padding: 2px 7px; border-radius: 9px; font-size: 9px; font-weight: 500; background: rgba(14,165,233,.12); border: 1px solid rgba(14,165,233,.22); color: #7dd3fc; cursor: pointer; white-space: nowrap; font-family: monospace; transition: all .12s; }
+        .css-chip:hover { background: rgba(14,165,233,.2); border-color: rgba(14,165,233,.4); }
+        .css-chip.off { opacity: .4; text-decoration: line-through; }
+        .css-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1px 8px; font-family: monospace; font-size: 10px; color: #cbd5e1; max-height: 56px; overflow-y: auto; }
+        .css-prop { color: #94a3b8; }
+        .css-val { color: #a5f3fc; }
+        .css-ta { width: 100%; background: rgba(0,0,0,.2); border: 1px solid rgba(255,255,255,.08); color: #e2e8f0; padding: 5px 7px; border-radius: 5px; font-size: 10px; font-family: monospace; outline: none; resize: vertical; min-height: 36px; box-sizing: border-box; line-height: 1.3; }
+        .css-ta:focus { border-color: #6366f1; }
+        .css-btn-row { display: flex; gap: 4px; }
+        .css-btn { padding: 3px 8px; border-radius: 5px; cursor: pointer; font-size: 9px; font-weight: 600; text-transform: uppercase; border: 1px solid transparent; transition: all .12s; }
+        .css-btn-apply { background: rgba(34,211,238,.12); border-color: rgba(34,211,238,.25); color: #67e8f9; }
+        .css-btn-apply:hover { background: rgba(34,211,238,.2); color: #a5f3fc; }
+        .css-btn-reset { background: rgba(239,68,68,.1); border-color: rgba(239,68,68,.18); color: #fca5a5; }
+        .css-btn-reset:hover { background: rgba(239,68,68,.18); color: #fecaca; }
+        .css-btn-copy { background: linear-gradient(135deg, rgba(16,185,129,.12), rgba(5,150,105,.1)); border-color: rgba(16,185,129,.3); color: #6ee7b7; }
+        .css-btn-copy:hover { background: linear-gradient(135deg, rgba(16,185,129,.2), rgba(5,150,105,.16)); color: #a7f3d0; }
+        #plugin-banner { display: none; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: 8px; background: rgba(245,158,11,.08); border: 1px solid rgba(245,158,11,.28); }
+        #plugin-banner.visible { display: flex; }
+        #plugin-banner .plugin-title { font-size: 11px; font-weight: 700; color: #fbbf24; }
+        #plugin-banner .plugin-body { font-size: 10px; color: #cbd5e1; line-height: 1.45; }
+        #plugin-banner pre { margin: 0; padding: 6px 8px; border-radius: 5px; background: rgba(0,0,0,.28); color: #e2e8f0; font-size: 9px; font-family: monospace; white-space: pre-wrap; word-break: break-word; max-height: 140px; overflow: auto; }
+        #plugin-copy-btn { align-self: flex-start; }
+    </style>
+</head>
+<body>
+    <div class="sidebar-content">
+        <div class="section">
+            <span class="section-label">Target Dev Server</span>
+            <input type="text" id="target-url" placeholder="http://localhost:3000" />
+            <div class="quick-chips" id="quick-chips">
+                <span class="quick-chip" data-url="3000">3000</span>
+                <span class="quick-chip" data-url="3001">3001</span>
+                <span class="quick-chip" data-url="5173">5173</span>
+                <span class="quick-chip" data-url="8080">8080</span>
+            </div>
+            <button id="launch-btn" class="btn btn-primary">Connect</button>
+        </div>
+
+        <div class="section">
+            <span class="section-label">Recent</span>
+            <div class="quick-chips" id="recent-chips"></div>
+        </div>
+
+        <hr class="divider" />
+
+        <div id="plugin-banner">
+            <span class="plugin-title">@kexari-lens/dev</span>
+            <div class="plugin-body" id="plugin-body">Exact file paths need this package. Connect will ask to install it, or run <code>npm install -D @kexari-lens/dev</code>, then restart <code>npm run dev</code>.</div>
+            <pre id="plugin-snippet" style="display:none"></pre>
+            <div class="css-btn-row">
+                <button id="plugin-enable-btn" class="css-btn css-btn-apply">Install / Repair</button>
+                <button id="plugin-copy-btn" class="css-btn css-btn-copy">Copy details</button>
+            </div>
+        </div>
+
+        <div class="section" id="css-section">
+            <span class="section-label">CSS Inspector <span id="css-element-name" style="color:#64748b;font-weight:400"></span></span>
+            <div id="css-class-chips" style="display:flex;flex-wrap:wrap;gap:3px"></div>
+            <div class="css-grid" id="css-styles-grid"></div>
+            <textarea class="css-ta" id="css-edit-area" placeholder="Edit classes here..."></textarea>
+            <div class="css-btn-row">
+                <button class="css-btn css-btn-apply" id="css-apply-btn">Apply</button>
+                <button class="css-btn css-btn-reset" id="css-reset-btn">Reset</button>
+                <button class="css-btn css-btn-copy" id="css-copy-btn">Copy for AI</button>
+            </div>
+        </div>
+
+        <hr class="divider" />
+
+        <div class="section">
+            <span class="section-label">Active Sessions</span>
+            <div id="session-list" class="session-list">
+                <div class="empty-state">
+                    <svg viewBox="0 0 24 24" style="width:24px;height:24px;stroke:rgba(255,255,255,.15);fill:none;stroke-width:1.5;margin-bottom:8px"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M2 9h20"></path></svg>
+                    <div>No active sessions.<br>Connect to a dev server above.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const vsc = acquireVsCodeApi();
+        const targetUrlInput = document.getElementById('target-url');
+        const launchBtn = document.getElementById('launch-btn');
+        const sessionListEl = document.getElementById('session-list');
+        const recentChipsEl = document.getElementById('recent-chips');
+        const cssSection = document.getElementById('css-section');
+        const cssClassChips = document.getElementById('css-class-chips');
+        const cssStylesGrid = document.getElementById('css-styles-grid');
+        const cssEditArea = document.getElementById('css-edit-area');
+        const cssApplyBtn = document.getElementById('css-apply-btn');
+        const cssResetBtn = document.getElementById('css-reset-btn');
+        const cssCopyBtn = document.getElementById('css-copy-btn');
+        const cssElementName = document.getElementById('css-element-name');
+        const pluginBanner = document.getElementById('plugin-banner');
+        const pluginSnippet = document.getElementById('plugin-snippet');
+        const pluginBody = document.getElementById('plugin-body');
+        const pluginCopyBtn = document.getElementById('plugin-copy-btn');
+        const pluginEnableBtn = document.getElementById('plugin-enable-btn');
+        let pluginSetupSnippet = '';
+
+        const DEFAULT_URL = 'http://localhost:3000';
+        const savedState = vsc.getState() || {};
+        targetUrlInput.value = savedState.lastUrl || DEFAULT_URL;
+        let recentUrls = savedState.recentUrls || [];
+        let lastCssData = null;
+        let originalClasses = [];
+
+        function saveState() { vsc.setState({ lastUrl: targetUrlInput.value, recentUrls }); }
+
+        function syncLaunchBtn() {
+            launchBtn.disabled = !targetUrlInput.value.trim();
+        }
+
+        function showPluginSetup(snippet) {
+            pluginSetupSnippet = snippet || '';
+            if (pluginSetupSnippet) {
+                pluginSnippet.textContent = pluginSetupSnippet;
+                pluginSnippet.style.display = 'block';
+            } else {
+                pluginSnippet.style.display = 'none';
+            }
+            pluginBanner.classList.add('visible');
+            pluginEnableBtn.style.display = '';
+            pluginEnableBtn.textContent = 'Install / Repair';
+            pluginEnableBtn.disabled = false;
+        }
+
+        function showPluginEnabled(message) {
+            pluginBanner.classList.add('visible');
+            pluginBody.textContent = message || 'Exact file paths enabled. Restart npm run dev, then reconnect.';
+            pluginSnippet.style.display = 'none';
+            pluginEnableBtn.style.display = 'none';
+        }
+
+        pluginEnableBtn.addEventListener('click', () => {
+            pluginEnableBtn.disabled = true;
+            pluginEnableBtn.textContent = 'Installing…';
+            vsc.postMessage({ action: 'enablePlugin' });
+        });
+
+        pluginCopyBtn.addEventListener('click', async () => {
+            const text = pluginSetupSnippet || 'Run command: Kexari Lens: Enable Exact File Paths';
+            try {
+                await navigator.clipboard.writeText(text);
+                pluginCopyBtn.textContent = 'Copied';
+                setTimeout(() => { pluginCopyBtn.textContent = 'Copy details'; }, 1500);
+            } catch {
+                // ignore
+            }
+        });
+
+        function updateRecentList() {
+            recentChipsEl.innerHTML = '';
+            [...new Set(recentUrls)].slice(0, 4).forEach(url => {
+                const chip = document.createElement('span');
+                chip.className = 'quick-chip';
+                chip.textContent = url.replace(/^https?:\/\//i, '');
+                chip.setAttribute('data-url', url);
+                chip.addEventListener('click', () => { targetUrlInput.value = url; launchBtn.click(); });
+                recentChipsEl.appendChild(chip);
+            });
+            saveState();
+        }
+
+        function addRecentUrl(url) {
+            let norm = url.trim();
+            if (!norm.startsWith('http')) norm = 'http://' + norm;
+            recentUrls = [norm, ...recentUrls.filter(u => u !== norm)].slice(0, 8);
+            updateRecentList();
+        }
+
+        function escapeHtml(v) { return String(v).replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>').replace(/"/g,'"'); }
+
+        function renderSessions(sessions) {
+            sessionListEl.innerHTML = '';
+            if (!sessions || !sessions.length) {
+                sessionListEl.innerHTML = '<div class="empty-state"><svg viewBox="0 0 24 24" style="width:24px;height:24px;stroke:rgba(255,255,255,.15);fill:none;stroke-width:1.5;margin-bottom:8px"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M2 9h20"></path></svg><div>No active sessions.<br>Connect to a dev server above.</div></div>';
+                return;
+            }
+            for (const s of sessions) {
+                const isErr = s.status === 'error';
+                const card = document.createElement('div');
+                card.className = 'session-card';
+                card.innerHTML = `<div class="session-header"><span class="session-dot${isErr?' error':''}"></span><span class="session-name">${escapeHtml(s.label)}</span><span style="font-size:9px;color:${isErr?'#ef4444':'#10b981'};font-weight:600;margin-left:auto">${isErr?'ERROR':'ON'}</span></div><div class="session-actions"><button class="btn-sm btn-focus" data-action="focus" data-target="${escapeHtml(s.targetUrl)}">Focus</button><button class="btn-sm btn-stop" data-action="stop" data-target="${escapeHtml(s.targetUrl)}">Stop</button></div>`;
+                sessionListEl.appendChild(card);
+            }
+            sessionListEl.querySelectorAll('[data-action="focus"]').forEach(b => b.addEventListener('click', () => vsc.postMessage({ action: 'focusSession', targetUrl: b.getAttribute('data-target') })));
+            sessionListEl.querySelectorAll('[data-action="stop"]').forEach(b => b.addEventListener('click', () => vsc.postMessage({ action: 'stopSession', targetUrl: b.getAttribute('data-target') })));
+        }
+
+        // Quick-connect chips
+        document.querySelectorAll('#quick-chips .quick-chip').forEach(c => {
+            c.addEventListener('click', () => { const u = c.getAttribute('data-url'); if (u) { targetUrlInput.value = u; syncLaunchBtn(); launchBtn.click(); } });
+        });
+
+        launchBtn.addEventListener('click', () => { const u = targetUrlInput.value.trim(); if (!u) return; addRecentUrl(u); vsc.postMessage({ action: 'launch', targetUrl: u }); });
+        targetUrlInput.addEventListener('keydown', e => { if (e.key === 'Enter' && !launchBtn.disabled) launchBtn.click(); });
+        targetUrlInput.addEventListener('input', () => { syncLaunchBtn(); saveState(); });
+        syncLaunchBtn();
+
+        // ── CSS Inspector Logic ────────────────────
+        function showCss(data) {
+            cssElementName.textContent = data.tagName ? '<' + data.tagName + '>' : '';
+            lastCssData = data;
+            cssClassChips.innerHTML = '';
+            if (data.className) {
+                originalClasses = data.className.split(/\s+/).filter(Boolean);
+                originalClasses.forEach(c => {
+                    const chip = document.createElement('span');
+                    chip.className = 'css-chip';
+                    chip.textContent = c;
+                    chip.title = 'Click to toggle';
+                    chip.addEventListener('click', () => { chip.classList.toggle('off'); rebuildText(); });
+                    cssClassChips.appendChild(chip);
+                });
+            } else { originalClasses = []; }
+
+            cssStylesGrid.innerHTML = '';
+            if (data.styles && Object.keys(data.styles).length) {
+                Object.entries(data.styles).filter(([,v]) => v && v !== 'none' && v !== 'normal' && v !== 'auto' && v !== '0px' && v !== 'rgba(0,0,0,0)' && v !== 'transparent').forEach(([k,v]) => {
+                    const prop = k.replace(/[A-Z]/g, m => '-' + m.toLowerCase());
+                    cssStylesGrid.innerHTML += `<div><span class="css-prop">${prop}:</span> <span class="css-val">${v}</span></div>`;
+                });
+            } else { cssStylesGrid.innerHTML = '<div style="color:#64748b;grid-column:span 2">No styles</div>'; }
+
+            rebuildText();
+            cssSection.classList.add('visible');
+        }
+
+        function hideCss() { cssSection.classList.remove('visible'); lastCssData = null; }
+
+        function rebuildText() {
+            const active = [];
+            cssClassChips.querySelectorAll('.css-chip:not(.off)').forEach(c => active.push(c.textContent));
+            cssEditArea.value = active.join(' ');
+        }
+
+        cssApplyBtn.addEventListener('click', () => { if (lastCssData) vsc.postMessage({ action: 'cssApply', className: cssEditArea.value.trim() }); });
+        cssResetBtn.addEventListener('click', () => { if (lastCssData) vsc.postMessage({ action: 'cssReset' }); });
+        cssCopyBtn.addEventListener('click', () => { vsc.postMessage({ action: 'cssCopyAi' }); });
+
+        window.addEventListener('message', event => {
+            const m = event.data;
+            if (!m) return;
+            if (m.type === 'KEXARI_LENS_SESSIONS_UPDATE') {
+                if (m.targetUrl) targetUrlInput.value = m.targetUrl;
+                syncLaunchBtn();
+                renderSessions(m.sessions || []);
+            } else if (m.type === 'KEXARI_LENS_CSS_DATA') {
+                showCss(m);
+            } else if (m.type === 'KEXARI_LENS_CSS_CLEAR') {
+                hideCss();
+            } else if (m.type === 'KEXARI_LENS_PLUGIN_MISSING') {
+                showPluginSetup(m.snippet || '');
+            } else if (m.type === 'KEXARI_LENS_PLUGIN_ENABLED') {
+                showPluginEnabled(m.message || '');
+            }
+        });
+
+        updateRecentList();
+        // Ask host to re-push sessions/CSS once listeners are live (avoids race on recreate).
+        vsc.postMessage({ action: 'ready' });
+    </script>
+</body>
+</html>

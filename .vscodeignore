@@ -5,6 +5,7 @@
 **/*.map
 tsconfig.json
 scripts/**
+packages/**
 Action.md
 commit_message.txt
 commit.bat

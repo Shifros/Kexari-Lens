@@ -1,9 +1,10 @@
 {
   "name": "kexari-lens",
   "displayName": "Kexari Lens",
-  "description": "Visual element inspector and React context extractor for Next.js",
-  "version": "0.1.1",
+  "description": "Visual element inspector for React/Next.js — click to copy component + file:line",
+  "version": "0.5.2",
   "publisher": "shifros",
+  "icon": "Shifros-favicon.png",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -15,35 +16,78 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [],
+  "activationEvents": [
+    "onView:kexariLens.sidebar"
+  ],
   "main": "./out/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "kexariLens",
+          "title": "Kexari Lens",
+          "icon": "Shifros-favicon.png"
+        }
+      ]
+    },
+    "views": {
+      "kexariLens": [
+        {
+          "type": "webview",
+          "id": "kexariLens.sidebar",
+          "name": "Inspector",
+          "retainContextWhenHidden": true
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Kexari Lens",
+      "properties": {
+        "kexariLens.targetUrl": {
+          "type": "string",
+          "default": "http://localhost:3000",
+          "description": "Default Next.js dev server URL to inspect (e.g. http://localhost:3000)"
+        },
+        "kexariLens.promptTemplate": {
+          "type": "string",
+          "default": "[Kexari Lens Context]\n{{viewportSummary}}Target Component: {{componentName}}{{stackedComponents}}\nFile Path: {{displayPath}}:{{lineNumber}}\nElement: <{{tagName}} className=\"{{className}}\">{{cssStyles}}\n\nInstruction:",
+          "description": "Template for the AI context copied to clipboard. Available placeholders: {{componentName}}, {{displayPath}}, {{lineNumber}}, {{tagName}}, {{className}}, {{text}}, {{cssStyles}}, {{viewportSummary}}, {{stackedComponents}}, {{landmark}}, {{mode}}"
+        }
+      }
+    },
     "commands": [
       {
         "command": "kexariLens.start",
         "title": "Kexari Lens: Start Inspector"
+      },
+      {
+        "command": "kexariLens.enableDevPlugin",
+        "title": "Kexari Lens: Install @kexari-lens/dev"
       }
     ]
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
-    "watch": "tsc -watch -p ./",
+    "compile": "node scripts/bundle.mjs",
+    "typecheck": "tsc --noEmit",
+    "watch": "node scripts/bundle.mjs --watch",
     "test:proxy": "npm run compile && node scripts/test-proxy.mjs",
+    "test:plugin": "node packages/kexari-lens-dev/test/transform.test.js",
+    "test:compat": "node scripts/test-next-compat.mjs",
+    "test": "npm run test:plugin && npm run test:compat",
     "package": "npm run compile && vsce package",
     "lint": "eslint src --ext ts"
   },
   "dependencies": {
     "express": "^4.19.2",
-    "http-proxy-middleware": "^3.0.0",
-    "source-map": "^0.7.6"
+    "http-proxy-middleware": "^3.0.0"
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.0",
-    "@types/source-map": "^0.5.2",
     "@types/vscode": "^1.85.0",
     "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.28.1",
     "typescript": "^5.3.3"
   }
 }
