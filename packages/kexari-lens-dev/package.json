@@ -1,0 +1,44 @@
+{
+  "name": "@kexari-lens/dev",
+  "version": "0.1.0",
+  "description": "Dev-only compile-time source injection for Kexari Lens (React 19 / Next.js / Vite)",
+  "license": "MIT",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "import": "./src/index.js",
+      "require": "./src/index.js",
+      "default": "./src/index.js"
+    },
+    "./loader": "./src/loader.js"
+  },
+  "files": [
+    "src"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {},
+  "dependencies": {
+    "@babel/core": "^7.26.0",
+    "@babel/generator": "^7.26.0",
+    "@babel/parser": "^7.26.0",
+    "@babel/traverse": "^7.26.0",
+    "@babel/types": "^7.26.0"
+  },
+  "keywords": [
+    "kexari-lens",
+    "react",
+    "nextjs",
+    "vite",
+    "devtools",
+    "source-map"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Shifros/Kexari-Lens.git",
+    "directory": "packages/kexari-lens-dev"
+  }
+}

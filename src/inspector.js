@@ -34,10 +34,62 @@
     badge.style.display = 'none';
   }
 
+  function parseKexariSourceAttr(raw) {
+    if (!raw || typeof raw !== 'string') return null;
+    // Format: path/to/File.tsx:line:col  (path may contain drive letters like C:/...)
+    const match = raw.match(/^(.*):(\d+):(\d+)$/);
+    if (!match) return null;
+    return {
+      fileName: match[1].replace(/\\/g, '/'),
+      lineNumber: parseInt(match[2], 10) || 0,
+      columnNumber: parseInt(match[3], 10) || 0
+    };
+  }
+
+  /** Walk up the DOM for compile-time injected data-kexari-* attributes. */
+  function findKexariSource(el) {
+    let node = el;
+    for (let i = 0; i < 40 && node && node !== document.body; i++) {
+      if (node.getAttribute) {
+        const raw = node.getAttribute('data-kexari-source');
+        if (raw) {
+          const parsed = parseKexariSourceAttr(raw);
+          if (parsed) {
+            return {
+              ...parsed,
+              componentName: node.getAttribute('data-kexari-component') || '',
+              fromNode: node
+            };
+          }
+        }
+      }
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  function pageHasKexariInstrumentation() {
+    try {
+      return !!document.querySelector('[data-kexari-source]');
+    } catch {
+      return false;
+    }
+  }
+
+  function notifyNeedsPlugin() {
+    window.parent.postMessage({
+      type: 'KEXARI_LENS_NEEDS_PLUGIN'
+    }, '*');
+  }
+
   function showBadgeForElement(el) {
+    const injected = findKexariSource(el);
     const landmark = getDomLandmark(el);
     const info = getReactInfo(el, landmark);
-    const componentName = info?.componentName || el.tagName.toLowerCase();
+    const componentName =
+      injected?.componentName ||
+      info?.componentName ||
+      el.tagName.toLowerCase();
     const selectedCount = selection.length;
 
     badge.textContent = selectedCount > 0
@@ -247,11 +299,13 @@
               lineNumber: fiberLine,
               columnNumber: fiberColumn || 0
             });
-          } else if (!isBad && !owners.length && fiberFile) {
+          } else if (!isBad && !owners.length) {
+            // Keep the name even when React 19 gives no usable path — paths
+            // come from data-kexari-source; Fiber is name enrichment only.
             owners.push({
               componentName: name,
-              fileName: fiberFile,
-              lineNumber: fiberLine,
+              fileName: fiberFile || '',
+              lineNumber: fiberLine || 0,
               columnNumber: fiberColumn || 0
             });
           } else if (isBad && !fallbackComponentName) {
@@ -404,11 +458,55 @@
         } else if (msg.action === 'forward') {
           window.history.forward();
         }
+      } else if (msg.type === 'KEXARI_LENS_APPLY_CSS') {
+        if (selection.length > 0) {
+          const el = selection[selection.length - 1].el;
+          const newClass = msg.className || '';
+          if (!el.dataset.kexariOriginalClass) {
+            el.dataset.kexariOriginalClass = typeof el.className === 'string' ? el.className : '';
+          }
+          if (typeof el.className === 'string') {
+            el.className = newClass;
+          } else if (el.className && typeof el.className.baseVal === 'string') {
+            el.className.baseVal = newClass;
+          }
+          selection[selection.length - 1].payload = buildTargetPayload(el);
+        }
+      } else if (msg.type === 'KEXARI_LENS_RESET_CSS') {
+        if (selection.length > 0) {
+          const el = selection[selection.length - 1].el;
+          const orig = el.dataset.kexariOriginalClass;
+          if (orig !== undefined) {
+            if (typeof el.className === 'string') {
+              el.className = orig;
+            } else if (el.className && typeof el.className.baseVal === 'string') {
+              el.className.baseVal = orig;
+            }
+            delete el.dataset.kexariOriginalClass;
+            selection[selection.length - 1].payload = buildTargetPayload(el);
+          }
+        }
+      } else if (msg.type === 'KEXARI_LENS_REFRESH_STYLES') {
+        if (selection.length > 0) {
+          const el = selection[selection.length - 1].el;
+          const styles = extractKeyStyles(el);
+          const cls = typeof el.className === 'string' ? el.className : (el.className?.baseVal || '');
+          window.parent.postMessage({
+            type: 'KEXARI_LENS_STYLES_REFRESHED',
+            styles,
+            className: cls
+          }, '*');
+          if (selection[selection.length - 1].payload) {
+            selection[selection.length - 1].payload.styles = styles;
+            selection[selection.length - 1].payload.className = cls;
+            selection[selection.length - 1].payload.stylesPrompt = formatStylesForPrompt(styles);
+          }
+        }
       }
     }
   });
 
-  // Multi-select state. Shift+Click toggles elements into this list.
+  // Multi-select state. Ctrl+Click (Cmd+Click on Mac) toggles elements into this list.
   // Cyan outline = locked in. Esc or a normal click resets.
   const selection = [];
 
@@ -493,27 +591,111 @@
     return text;
   }
 
+  /** Grabs a focused set of computed styles useful for AI context. */
+  function extractKeyStyles(el) {
+    if (!el || !window.getComputedStyle) return null;
+    try {
+      const cs = window.getComputedStyle(el);
+      return {
+        color: cs.color || '',
+        backgroundColor: cs.backgroundColor || '',
+        fontSize: cs.fontSize || '',
+        fontWeight: cs.fontWeight || '',
+        fontFamily: cs.fontFamily ? cs.fontFamily.split(',')[0].replace(/['"]/g, '') : '',
+        padding: cs.padding || '',
+        margin: cs.margin || '',
+        display: cs.display || '',
+        position: cs.position || '',
+        width: cs.width || '',
+        height: cs.height || '',
+        borderRadius: cs.borderRadius || '',
+        border: cs.border || '',
+        boxShadow: cs.boxShadow !== 'none' ? cs.boxShadow : '',
+        opacity: cs.opacity !== '1' ? cs.opacity : '',
+        gap: cs.gap !== 'normal' ? cs.gap : '',
+        flexDirection: cs.flexDirection || '',
+        alignItems: cs.alignItems || '',
+        justifyContent: cs.justifyContent || '',
+        textAlign: cs.textAlign || '',
+        lineHeight: cs.lineHeight || ''
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** Formats computed styles into a compact string for clipboard / AI prompts. */
+  function formatStylesForPrompt(styles) {
+    if (!styles) return '';
+    const meaningful = [];
+    const skip = ['width', 'height', 'display', 'position', 'fontFamily', 'fontWeight'];
+    for (const [key, val] of Object.entries(styles)) {
+      if (!val || val === 'none' || val === 'normal' || val === 'auto' || val === '0px' || val === 'rgba(0, 0, 0, 0)' || val === 'transparent' || val === 'rgb(0, 0, 0)') continue;
+      // Convert camelCase to dash-case for readability
+      const cssProp = key.replace(/[A-Z]/g, (m) => '-' + m.toLowerCase());
+      meaningful.push(`  ${cssProp}: ${val}`);
+    }
+    if (!meaningful.length) return '';
+    // Order important ones first
+    return meaningful.join('\n');
+  }
+
   function buildTargetPayload(el) {
     const landmark = getDomLandmark(el);
+    const injected = findKexariSource(el);
+    // Fiber is optional enrichment for component name only — paths come from
+    // compile-time data-kexari-source (React 19 removed reliable _debugSource).
     const info = getReactInfo(el, landmark);
     const className = typeof el.className === 'string'
       ? el.className
       : (el.className?.baseVal || '');
     const text = extractVisibleText(el);
+    const styles = extractKeyStyles(el);
+
+    const componentName =
+      injected?.componentName ||
+      info?.componentName ||
+      'Unknown';
+    // Prefer compile-time attrs (required on React 19). Fall back to Fiber
+    // _debugSource / _debugStack when present (React 17/18, or partial inject).
+    const fiberFile =
+      info?.fileName && !isThirdPartyOrCompiled(info.fileName) && looksLikeSourceFile(info.fileName)
+        ? info.fileName
+        : null;
+    const fileName = injected?.fileName || fiberFile || 'Unknown';
+    const lineNumber = injected?.lineNumber || (fiberFile ? info.lineNumber : 0) || 0;
+    const columnNumber = injected?.columnNumber || (fiberFile ? info.columnNumber : 0) || 0;
 
     return {
-      componentName: info?.componentName || 'Unknown',
-      fileName: info?.fileName || 'Unknown',
-      lineNumber: info?.lineNumber || 0,
-      columnNumber: info?.columnNumber || 0,
+      componentName,
+      fileName,
+      lineNumber,
+      columnNumber,
       tagName: el.tagName.toLowerCase(),
       className,
       text,
+      styles,
+      stylesPrompt: formatStylesForPrompt(styles),
       landmark: landmark || '',
       textIndex: getTextOccurrenceIndex(el, text),
       owners: info?.owners || [],
-      stackFrames: info?.stackFrames || []
+      stackFrames: [],
+      instrumented: !!injected
     };
+  }
+
+  // After load / hydration, tell the extension if the app lacks @kexari-lens/dev.
+  function checkInstrumentation() {
+    if (pageHasKexariInstrumentation()) {
+      return;
+    }
+    notifyNeedsPlugin();
+  }
+
+  if (document.readyState === 'complete') {
+    setTimeout(checkInstrumentation, 800);
+  } else {
+    window.addEventListener('load', () => setTimeout(checkInstrumentation, 800));
   }
 
   document.addEventListener('mouseover', (e) => {
@@ -561,7 +743,7 @@
     const payload = buildTargetPayload(el);
 
     // Shift+Click: add/remove from a multi-selection set
-    if (e.shiftKey) {
+    if (e.ctrlKey || e.metaKey) {
       const existingIndex = selection.findIndex((item) => item.el === el);
 
       if (existingIndex >= 0) {

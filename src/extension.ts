@@ -1,10 +1,23 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as http from 'http';
 import { startProxyServer, ProxyServerInstance } from './proxy';
 import { resolveInspectedSource } from './resolveSource';
+import { SidebarViewProvider, SessionInfo } from './sidebar';
+import {
+  askAndInstallDevPlugin,
+  detectProjectKind,
+  enableDevPluginForWorkspace,
+  getCompatPlanForRoot,
+  isDevPluginListed,
+  isDevPluginReady,
+  isDevPluginResolvable
+} from './enableDevPlugin';
 
 const LAST_TARGET_KEY = 'kexariLens.lastTargetUrl';
 const DEFAULT_TARGET_URL = 'http://localhost:3000';
+
 
 interface KexariSession {
   panel: vscode.WebviewPanel;
@@ -20,111 +33,112 @@ interface KexariSession {
 /** One session per dev-server target, keyed by normalized target URL — lets you inspect several ports/projects at once. */
 const sessions = new Map<string, KexariSession>();
 
+/** Tracks which session last had an element inspected — CSS sidebar actions target this. */
+let activeCssSession: KexariSession | undefined;
+
+/** Stores the last fully-resolved inspect data so "Copy for AI" can regenerate with computed styles. */
+let lastInspectedData: any;
+
 export function activate(context: vscode.ExtensionContext) {
   console.log('Kexari Lens extension is now active!');
 
-  let startCommand = vscode.commands.registerCommand('kexariLens.start', async () => {
+  // ── Sidebar (settings + launch panel) ──────────────────────────────────
+  const sidebarProvider = new SidebarViewProvider(context);
+
+  sidebarProvider.onLaunch = async (rawTargetUrl: string) => {
+    const targetUrl = normalizeTargetUrl(rawTargetUrl);
+    if (!targetUrl) {
+      vscode.window.showErrorMessage('Kexari Lens: Invalid target URL. Enter a port, host:port, or full URL.');
+      return;
+    }
+    await context.globalState.update(LAST_TARGET_KEY, targetUrl);
+    await launchSession(context, targetUrl, sidebarProvider);
+  };
+
+  sidebarProvider.onFocusSession = (targetUrl: string) => {
+    const session = sessions.get(targetUrl);
+    if (session) {
+      session.panel.reveal(vscode.ViewColumn.Active);
+    }
+  };
+
+  sidebarProvider.onStopSession = async (targetUrl: string) => {
+    const session = sessions.get(targetUrl);
+    if (session) {
+      session.panel.dispose();
+      // panel.onDidDispose handles cleanup + postSessions
+    }
+  };
+
+  // CSS inspector callbacks — forward sidebar actions to the active session's iframe
+  sidebarProvider.onCssApply = (className: string) => {
+    if (activeCssSession?.panel) {
+      activeCssSession.panel.webview.postMessage({ type: 'KEXARI_LENS_APPLY_CSS', className });
+      setTimeout(() => {
+        activeCssSession?.panel.webview.postMessage({ type: 'KEXARI_LENS_REFRESH_STYLES' });
+      }, 200);
+    }
+  };
+  sidebarProvider.onCssReset = () => {
+    if (activeCssSession?.panel) {
+      activeCssSession.panel.webview.postMessage({ type: 'KEXARI_LENS_RESET_CSS' });
+      setTimeout(() => {
+        activeCssSession?.panel.webview.postMessage({ type: 'KEXARI_LENS_REFRESH_STYLES' });
+      }, 200);
+    }
+  };
+  sidebarProvider.onCssCopyAi = async () => {
+    // Regenerate full AI prompt from last inspected data
+    if (lastInspectedData && lastInspectedData.targets.length > 0) {
+      const resolvedTargets = lastInspectedData.resolvedTargets;
+      const mode = lastInspectedData.mode;
+      const viewport = lastInspectedData.viewport;
+      const template = vscode.workspace.getConfiguration('kexariLens').get<string>('promptTemplate')
+        || '[Kexari Lens Context]\n{{viewportSummary}}Target Component: {{componentName}}{{stackedComponents}}\nFile Path: {{displayPath}}:{{lineNumber}}\nElement: <{{tagName}} className="{{className}}">{{cssStyles}}\n\nInstruction:';
+
+      let formattedPrompt = '';
+      if (mode === 'multi' && resolvedTargets.length > 1) {
+        const blocks = resolvedTargets.map((t: any, i: number) =>
+          resolvePrompt(template, { ...t, mode: 'multi', index: i + 1, viewport })
+        ).join('\n\n');
+        formattedPrompt = `${blocks}\n\nInstruction:`;
+      } else {
+        formattedPrompt = resolvePrompt(template, { ...resolvedTargets[0], mode: 'single', index: 1, viewport });
+      }
+      await vscode.env.clipboard.writeText(formattedPrompt);
+      vscode.window.showInformationMessage('Kexari Lens: AI context copied! Paste into any AI tool.');
+    }
+  };
+
+  sidebarProvider.onEnablePlugin = async () => {
+    await runEnablePlugin(context, sidebarProvider);
+  };
+
+  // When sidebar is recreated (tab switch), re-push current sessions
+  sidebarProvider.onRefresh = () => {
+    sidebarProvider.postSessions(buildSessionList());
+  };
+
+  context.subscriptions.push(
+    vscode.window.registerWebviewViewProvider(SidebarViewProvider.viewType, sidebarProvider, {
+      webviewOptions: { retainContextWhenHidden: true }
+    })
+  );
+
+  // ── Command palette entry (kept for muscle memory) ─────────────────────
+  const startCommand = vscode.commands.registerCommand('kexariLens.start', async () => {
     const targetUrl = await promptForTargetUrl(context);
     if (!targetUrl) {
       return;
     }
-
-    const existing = sessions.get(targetUrl);
-    if (existing) {
-      existing.panel.reveal(vscode.ViewColumn.Active);
-      return;
-    }
-
-    const inspectorScriptPath = path.join(context.extensionPath, 'src', 'inspector.js');
-    const label = targetUrl.replace(/^https?:\/\//i, '');
-
-    await vscode.window.withProgress({
-      location: vscode.ProgressLocation.Notification,
-      title: `Kexari Lens: Connecting to ${label}...`,
-      cancellable: false
-    }, async () => {
-      try {
-        // Port 0 = OS picks a free port, so any number of targets can run side by side.
-        const proxy = await startProxyServer(0, targetUrl, inspectorScriptPath);
-        const proxyUrl = `http://localhost:${proxy.port}`;
-
-        const panel = vscode.window.createWebviewPanel(
-          'kexariLensInspector',
-          `Kexari Lens — ${label}`,
-          vscode.ViewColumn.Active,
-          {
-            enableScripts: true,
-            retainContextWhenHidden: true
-          }
-        );
-
-        const session: KexariSession = {
-          panel,
-          proxy,
-          proxyUrl,
-          targetUrl,
-          lastJumpTarget: undefined,
-          latestInspectId: 0
-        };
-        sessions.set(targetUrl, session);
-
-        panel.webview.html = getWebviewContent(proxyUrl, label);
-
-        panel.webview.onDidReceiveMessage(
-          async (message) => {
-            try {
-              if (message?.action === 'jump') {
-                await jumpToSource(session);
-                return;
-              }
-
-              const payload = message;
-              const targets = Array.isArray(payload?.targets)
-                ? payload.targets
-                : [payload];
-              const mode = payload?.mode === 'multi' || targets.length > 1 ? 'multi' : 'single';
-
-              // Disable Code until this selection resolves to a known path.
-              session.lastJumpTarget = undefined;
-              notifyJumpAvailability(session, false);
-              const inspectId = ++session.latestInspectId;
-
-              // Resolve + clipboard in the background so a Jump click is never blocked
-              // behind slow source-map work.
-              void handleInspectClipboard(
-                session,
-                targets,
-                mode,
-                payload?.viewport,
-                inspectId
-              );
-            } catch (err: any) {
-              vscode.window.showErrorMessage(
-                `Kexari Lens: ${err?.message || err}`
-              );
-            }
-          },
-          undefined,
-          context.subscriptions
-        );
-
-        panel.onDidDispose(
-          async () => {
-            sessions.delete(targetUrl);
-            await proxy.close();
-            console.log(`[Kexari Lens] Proxy server stopped for ${targetUrl}.`);
-          },
-          null,
-          context.subscriptions
-        );
-
-      } catch (err: any) {
-        vscode.window.showErrorMessage(`Kexari Lens failed to start proxy server for ${label}: ${err.message}`);
-      }
-    });
+    await launchSession(context, targetUrl, sidebarProvider);
   });
 
-  context.subscriptions.push(startCommand);
+  const enableCommand = vscode.commands.registerCommand('kexariLens.enableDevPlugin', async () => {
+    await runEnablePlugin(context, sidebarProvider);
+  });
+
+  context.subscriptions.push(startCommand, enableCommand);
 }
 
 export function deactivate() {
@@ -154,6 +168,304 @@ function normalizeTargetUrl(raw: string): string | null {
   }
 }
 
+/** Builds the session info list for the sidebar. */
+function buildSessionList(): SessionInfo[] {
+  const list: SessionInfo[] = [];
+  for (const [targetUrl, session] of sessions) {
+    list.push({
+      targetUrl,
+      label: targetUrl.replace(/^https?:\/\//i, '')
+    });
+  }
+  return list;
+}
+
+async function runEnablePlugin(
+  context: vscode.ExtensionContext,
+  sidebarProvider: SidebarViewProvider
+): Promise<void> {
+  try {
+    const result = await enableDevPluginForWorkspace(context.extensionPath);
+    if (result.ok && !result.skipped) {
+      sidebarProvider.postPluginEnabled(result.message);
+      vscode.window.showInformationMessage(`Kexari Lens: ${result.message}`);
+    } else if (!result.ok) {
+      sidebarProvider.postPluginSetup(result.message);
+      vscode.window.showErrorMessage(`Kexari Lens: ${result.message}`);
+    }
+  } catch (err: any) {
+    vscode.window.showErrorMessage(`Kexari Lens: ${err?.message || err}`);
+  }
+}
+
+async function handleNeedsPlugin(
+  _context: vscode.ExtensionContext,
+  sidebarProvider: SidebarViewProvider
+): Promise<void> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  const root = folder?.uri.fsPath;
+  const listed = root ? isDevPluginListed(root) : false;
+  const resolvable = root ? isDevPluginResolvable(root) : false;
+
+  if (listed && !resolvable) {
+    sidebarProvider.postPluginSetup(
+      '@kexari-lens/dev is in package.json but files are missing (.kexari).\n\n1. Click Install / Repair\n2. Stop and restart npm run dev\n3. Connect again'
+    );
+    return;
+  }
+
+  if (listed && resolvable && root) {
+    const plan = getCompatPlanForRoot(root);
+    if (!isDevPluginReady(root)) {
+      sidebarProvider.postPluginSetup(
+        `Lens wiring is incomplete for this app (${plan.summary}).\n\n1. Click Install / Repair\n2. Restart npm run dev\n3. Connect again`
+      );
+      return;
+    }
+    sidebarProvider.postPluginSetup(
+      `@kexari-lens/dev is installed (${plan.summary}), but this page has no data-kexari-source yet.\n\n1. Confirm Connect URL is this same project\n2. Stop npm run dev, delete .next, start again\n3. Connect`
+    );
+    return;
+  }
+
+  sidebarProvider.postPluginSetup(
+    'Exact file paths need @kexari-lens/dev.\n\n1. Click Install / Repair\n2. Restart npm run dev\n3. Connect again'
+  );
+}
+
+function isUrlReachable(targetUrl: string, timeoutMs = 2500): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (!settled) {
+        settled = true;
+        resolve(ok);
+      }
+    };
+    try {
+      const url = new URL(targetUrl);
+      const req = http.request(
+        {
+          hostname: url.hostname,
+          port: url.port || (url.protocol === 'https:' ? 443 : 80),
+          path: '/',
+          method: 'GET',
+          timeout: timeoutMs
+        },
+        (res) => {
+          res.resume();
+          done(true);
+        }
+      );
+      req.on('error', () => done(false));
+      req.on('timeout', () => {
+        req.destroy();
+        done(false);
+      });
+      req.end();
+    } catch {
+      done(false);
+    }
+  });
+}
+
+/**
+ * Before opening the inspector:
+ * If Next/Vite and plugin missing → ask to install @kexari-lens/dev.
+ * Always open the panel even if the target is still compiling or not up yet —
+ * the proxy shows a waiting page that retries automatically.
+ */
+async function prepareBeforeConnect(
+  context: vscode.ExtensionContext,
+  targetUrl: string,
+  sidebarProvider: SidebarViewProvider
+): Promise<boolean> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (folder) {
+    const root = folder.uri.fsPath;
+    const kind = detectProjectKind(root);
+    if ((kind === 'next' || kind === 'vite') && !isDevPluginReady(root, kind)) {
+      const result = await askAndInstallDevPlugin(context.extensionPath);
+      if (!result.ok) {
+        vscode.window.showErrorMessage(`Kexari Lens: ${result.message}`);
+        return false;
+      }
+      if (!result.skipped && !result.alreadyEnabled) {
+        sidebarProvider.postPluginEnabled(result.message);
+        vscode.window.showInformationMessage(
+          result.repaired
+            ? 'Kexari Lens: plugin repaired. Restart `npm run dev`, then Connect again.'
+            : 'Kexari Lens: plugin installed. Start (or restart) `npm run dev`, then Connect again.'
+        );
+        return false;
+      }
+    }
+  }
+
+  const up = await isUrlReachable(targetUrl);
+  if (!up) {
+    // Soft notice only — still open so the user can wait through compile / late start.
+    vscode.window.showInformationMessage(
+      `Kexari Lens: ${targetUrl} is not responding yet (compiling or not started). Opening anyway — reload when ready.`
+    );
+  }
+
+  return true;
+}
+
+/** Shared logic to create a proxy + webview panel for a given target URL. */
+async function launchSession(
+  context: vscode.ExtensionContext,
+  targetUrl: string,
+  sidebarProvider: SidebarViewProvider
+): Promise<void> {
+  const existing = sessions.get(targetUrl);
+  if (existing) {
+    existing.panel.reveal(vscode.ViewColumn.Active);
+    return;
+  }
+
+  const ready = await prepareBeforeConnect(context, targetUrl, sidebarProvider);
+  if (!ready) {
+    return;
+  }
+
+  const inspectorScriptPath = path.join(context.extensionPath, 'out', 'inspector.js');
+  const label = targetUrl.replace(/^https?:\/\//i, '');
+
+  await vscode.window.withProgress({
+    location: vscode.ProgressLocation.Notification,
+    title: `Kexari Lens: Connecting to ${label}...`,
+    cancellable: false
+  }, async () => {
+    try {
+      // Port 0 = OS picks a free port, so any number of targets can run side by side.
+      const proxy = await startProxyServer(0, targetUrl, inspectorScriptPath);
+      const proxyUrl = `http://localhost:${proxy.port}`;
+
+      const panel = vscode.window.createWebviewPanel(
+        'kexariLensInspector',
+        `Kexari Lens — ${label}`,
+        vscode.ViewColumn.Active,
+        {
+          enableScripts: true,
+          retainContextWhenHidden: true
+        }
+      );
+
+      const session: KexariSession = {
+        panel,
+        proxy,
+        proxyUrl,
+        targetUrl,
+        lastJumpTarget: undefined,
+        latestInspectId: 0
+      };
+      sessions.set(targetUrl, session);
+
+      panel.webview.html = getWebviewContent(context, proxyUrl, label);
+
+      panel.webview.onDidReceiveMessage(
+        async (message) => {
+          try {
+            if (message?.action === 'jump') {
+              await jumpToSource(session);
+              return;
+            }
+
+            if (message?.action === 'needsPlugin') {
+              await handleNeedsPlugin(context, sidebarProvider);
+              return;
+            }
+
+            if (message?.action === 'copyAi') {
+              const existing = await vscode.env.clipboard.readText();
+              if (existing && existing.includes('[Kexari Lens Context]')) {
+                await vscode.env.clipboard.writeText(existing);
+                vscode.window.showInformationMessage('Kexari Lens: AI context copied! Paste into your AI tool.');
+              } else {
+                vscode.window.showWarningMessage('Kexari Lens: Inspect an element first, then use Copy for AI.');
+              }
+              return;
+            }
+
+            if (message?.action === 'stylesRefreshed') {
+              // CSS Apply/Reset via sidebar → inspector re-extracted styles → push back to sidebar
+              sidebarProvider.postCssData({
+                className: message.className || '',
+                styles: message.styles || {},
+                stylesPrompt: '',
+                tagName: '',
+                text: ''
+              });
+              return;
+            }
+
+            if (message?.action === 'selectionCleared') {
+              sidebarProvider.clearCssData();
+              return;
+            }
+
+            const payload = message;
+            const targets = Array.isArray(payload?.targets)
+              ? payload.targets
+              : [payload];
+            const mode = payload?.mode === 'multi' || targets.length > 1 ? 'multi' : 'single';
+
+            // Forward CSS data to sidebar
+            activeCssSession = session;
+            const firstTarget = targets[0] || {};
+            sidebarProvider.postCssData({
+              className: firstTarget.className || '',
+              styles: firstTarget.styles || {},
+              stylesPrompt: firstTarget.stylesPrompt || '',
+              tagName: firstTarget.tagName || 'div',
+              text: firstTarget.text || ''
+            });
+
+            // Disable Code until this selection resolves to a known path.
+            session.lastJumpTarget = undefined;
+            notifyJumpAvailability(session, false);
+            const inspectId = ++session.latestInspectId;
+
+            // Resolve + clipboard in the background so a Jump click is never blocked
+            // behind slow source-map work.
+            void handleInspectClipboard(
+              session,
+              targets,
+              mode,
+              payload?.viewport,
+              inspectId
+            );
+          } catch (err: any) {
+            vscode.window.showErrorMessage(
+              `Kexari Lens: ${err?.message || err}`
+            );
+          }
+        },
+        undefined,
+        context.subscriptions
+      );
+
+      panel.onDidDispose(
+        async () => {
+          sessions.delete(targetUrl);
+          await proxy.close();
+          console.log(`[Kexari Lens] Proxy server stopped for ${targetUrl}.`);
+          sidebarProvider.postSessions(buildSessionList());
+        },
+        null,
+        context.subscriptions
+      );
+
+      sidebarProvider.postSessions(buildSessionList(), targetUrl);
+
+    } catch (err: any) {
+      vscode.window.showErrorMessage(`Kexari Lens failed to start proxy server for ${label}: ${err.message}`);
+    }
+  });
+}
+
 /** Asks which dev server to inspect — defaults to the last one used, or localhost:3000. */
 async function promptForTargetUrl(context: vscode.ExtensionContext): Promise<string | undefined> {
   const lastUsed = context.globalState.get<string>(LAST_TARGET_KEY, DEFAULT_TARGET_URL);
@@ -179,425 +491,36 @@ async function promptForTargetUrl(context: vscode.ExtensionContext): Promise<str
   return normalized;
 }
 
-function getWebviewContent(proxyUrl: string, targetLabel: string): string {
-  return `<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Kexari Lens Inspector</title>
-    <style>
-        html, body {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            overflow: hidden;
-            background-color: var(--vscode-editor-background, #121214);
-            font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
-            display: flex;
-            flex-direction: column;
-        }
-        #toolbar {
-            display: flex;
-            align-items: center;
-            gap: 12px;
-            padding: 8px 16px;
-            background-color: var(--vscode-editorWidget-background, #18181c);
-            border-bottom: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.06));
-            user-select: none;
-            box-sizing: border-box;
-            height: 44px;
-        }
-        #navigation-controls {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-        }
-        .nav-btn {
-            background: transparent;
-            border: 1px solid transparent;
-            color: var(--vscode-foreground, #a6a6a6);
-            width: 28px;
-            height: 28px;
-            border-radius: 6px;
-            cursor: pointer;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            box-sizing: border-box;
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        .nav-btn:hover {
-            background-color: rgba(255, 255, 255, 0.06);
-            color: #ffffff;
-            border-color: rgba(255, 255, 255, 0.04);
-        }
-        .nav-btn:active {
-            transform: scale(0.92);
-            background-color: rgba(255, 255, 255, 0.1);
-        }
-        .nav-btn svg {
-            width: 14px;
-            height: 14px;
-            fill: currentColor;
-        }
-        #target-badge {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 0 10px;
-            height: 28px;
-            border-radius: 8px;
-            background: rgba(99, 102, 241, 0.1);
-            border: 1px solid rgba(99, 102, 241, 0.22);
-            color: #a5b4fc;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.2px;
-            white-space: nowrap;
-            flex-shrink: 0;
-        }
-        #target-badge svg {
-            width: 11px;
-            height: 11px;
-            fill: none;
-            stroke: currentColor;
-            stroke-width: 2;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-            flex-shrink: 0;
-        }
-        #url-bar-container {
-            display: flex;
-            flex-grow: 1;
-            align-items: center;
-            gap: 8px;
-            background-color: rgba(255, 255, 255, 0.03);
-            border: 1px solid rgba(255, 255, 255, 0.08);
-            border-radius: 8px;
-            padding: 0 12px;
-            height: 28px;
-            box-sizing: border-box;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        #url-bar-container:hover {
-            background-color: rgba(255, 255, 255, 0.05);
-            border-color: rgba(255, 255, 255, 0.12);
-        }
-        #url-bar-container:focus-within {
-            background-color: rgba(0, 0, 0, 0.2);
-            border-color: #6366f1;
-            box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3), 0 2px 8px rgba(0, 0, 0, 0.15);
-        }
-        .url-icon {
-            width: 12px;
-            height: 12px;
-            fill: none;
-            stroke: rgba(255, 255, 255, 0.4);
-            stroke-width: 2;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-            flex-shrink: 0;
-        }
-        #url-input {
-            background: none;
-            border: none;
-            outline: none;
-            color: var(--vscode-input-foreground, #e2e8f0);
-            font-family: var(--vscode-editor-font-family, Menlo, Monaco, Consolas, "Courier New", monospace);
-            font-size: 11px;
-            width: 100%;
-            padding: 0;
-            margin: 0;
-            letter-spacing: 0.3px;
-        }
-        #toggle-inspector-btn {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            padding: 4px 14px;
-            height: 28px;
-            border-radius: 20px;
-            cursor: pointer;
-            box-sizing: border-box;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.4px;
-            text-transform: uppercase;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            border: 1px solid transparent;
-        }
-        #toggle-inspector-btn.active {
-            background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.12));
-            border-color: rgba(99, 102, 241, 0.25);
-            color: #a5b4fc;
-            box-shadow: 0 2px 6px rgba(99, 102, 241, 0.1);
-        }
-        #toggle-inspector-btn.active:hover {
-            background: linear-gradient(135deg, rgba(99, 102, 241, 0.18), rgba(79, 70, 229, 0.18));
-            border-color: rgba(99, 102, 241, 0.4);
-            color: #c7d2fe;
-        }
-        #toggle-inspector-btn:not(.active) {
-            background: rgba(255, 255, 255, 0.02);
-            border-color: rgba(255, 255, 255, 0.05);
-            color: #94a3b8;
-        }
-        #toggle-inspector-btn:not(.active):hover {
-            background: rgba(255, 255, 255, 0.05);
-            border-color: rgba(255, 255, 255, 0.1);
-            color: #cbd5e1;
-        }
-        .inspector-dot {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-        }
-        #toggle-inspector-btn.active .inspector-dot {
-            background-color: #10b981;
-            box-shadow: 0 0 8px #10b981, 0 0 16px rgba(16, 185, 129, 0.4);
-            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-        }
-        #toggle-inspector-btn:not(.active) .inspector-dot {
-            background-color: #64748b;
-        }
-        .inspector-icon {
-            width: 12px;
-            height: 12px;
-            fill: none;
-            stroke: currentColor;
-            stroke-width: 2.5;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-        #jump-code-btn {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            padding: 4px 12px;
-            height: 28px;
-            border-radius: 8px;
-            box-sizing: border-box;
-            font-size: 11px;
-            font-weight: 600;
-            letter-spacing: 0.4px;
-            text-transform: uppercase;
-            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-            border: 1px solid rgba(255, 255, 255, 0.06);
-            background: rgba(255, 255, 255, 0.02);
-            color: #64748b;
-            cursor: not-allowed;
-            opacity: 0.55;
-        }
-        #jump-code-btn.enabled {
-            cursor: pointer;
-            opacity: 1;
-            background: linear-gradient(135deg, rgba(34, 211, 238, 0.12), rgba(99, 102, 241, 0.12));
-            border-color: rgba(34, 211, 238, 0.3);
-            color: #a5f3fc;
-        }
-        #jump-code-btn.enabled:hover {
-            background: linear-gradient(135deg, rgba(34, 211, 238, 0.2), rgba(99, 102, 241, 0.18));
-            border-color: rgba(34, 211, 238, 0.45);
-            color: #cffafe;
-        }
-        #jump-code-btn:disabled {
-            opacity: 0.55;
-            cursor: not-allowed;
-        }
-        #iframe-container {
-            flex-grow: 1;
-            position: relative;
-            width: 100%;
-            height: calc(100% - 44px);
-        }
-        iframe {
-            width: 100%;
-            height: 100%;
-            border: none;
-            overflow: hidden;
-            background-color: #121214;
-        }
-        @keyframes pulse {
-            0%, 100% {
-                opacity: 1;
-                transform: scale(1);
-            }
-            50% {
-                opacity: .6;
-                transform: scale(1.15);
-            }
-        }
-    </style>
-</head>
-<body>
-    <div id="toolbar">
-        <div id="navigation-controls">
-            <button id="back-btn" class="nav-btn" title="Back">
-                <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
-            </button>
-            <button id="forward-btn" class="nav-btn" title="Forward">
-                <svg viewBox="0 0 24 24"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8-8-8z"/></svg>
-            </button>
-            <button id="reload-btn" class="nav-btn" title="Reload">
-                <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.07 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
-            </button>
-        </div>
-        <div id="target-badge" title="Dev server this panel is inspecting">
-            <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M2 9h20"></path></svg>
-            <span>${targetLabel}</span>
-        </div>
-        <div id="url-bar-container">
-            <svg class="url-icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
-            <input type="text" id="url-input" value="/" placeholder="Enter URL path (e.g. /about)" />
-        </div>
-        <button id="jump-code-btn" disabled title="Select an element first, then jump to its source">
-            <span>Code</span>
-        </button>
-        <button id="toggle-inspector-btn" class="active" title="Toggle Visual Inspector (Selector)">
-            <svg class="inspector-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="3"></circle></svg>
-            <span class="inspector-dot"></span>
-            <span class="inspector-text">Inspector: ON</span>
-        </button>
-    </div>
-    <div id="iframe-container">
-        <iframe id="proxy-iframe" src="${proxyUrl}"></iframe>
-    </div>
-    
-    <script>
-        const vscode = acquireVsCodeApi();
-        const iframe = document.getElementById('proxy-iframe');
-        const urlInput = document.getElementById('url-input');
-        const backBtn = document.getElementById('back-btn');
-        const forwardBtn = document.getElementById('forward-btn');
-        const reloadBtn = document.getElementById('reload-btn');
-        const toggleInspectorBtn = document.getElementById('toggle-inspector-btn');
-        const inspectorText = toggleInspectorBtn.querySelector('.inspector-text');
-        const jumpCodeBtn = document.getElementById('jump-code-btn');
-        
-        let inspectorEnabled = true;
-        let jumpTarget = null;
-        let jumpReady = false;
-        const proxyBaseUrl = "${proxyUrl}";
+let webviewTemplateCache: string | null = null;
 
-        function setJumpReady(ready, label) {
-            jumpReady = !!ready;
-            if (jumpReady) {
-                jumpCodeBtn.disabled = false;
-                jumpCodeBtn.classList.add('enabled');
-                jumpCodeBtn.title = label
-                    ? ('Open ' + label)
-                    : 'Open clipboard source path in editor';
-            } else {
-                jumpCodeBtn.disabled = true;
-                jumpCodeBtn.classList.remove('enabled');
-                jumpCodeBtn.title = 'Select an element with a known source path first';
-            }
-        }
+/** Escapes a value for safe interpolation into an HTML attribute/text context. */
+function escapeHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
-        function setJumpTarget(target) {
-            jumpTarget = target || null;
-            // Stay disabled until the extension resolves a real file path.
-            setJumpReady(false);
-        }
-        
-        reloadBtn.addEventListener('click', () => {
-            iframe.contentWindow.postMessage({ type: 'KEXARI_LENS_NAVIGATE', action: 'reload' }, '*');
-        });
-        
-        backBtn.addEventListener('click', () => {
-            iframe.contentWindow.postMessage({ type: 'KEXARI_LENS_NAVIGATE', action: 'back' }, '*');
-        });
-        
-        forwardBtn.addEventListener('click', () => {
-            iframe.contentWindow.postMessage({ type: 'KEXARI_LENS_NAVIGATE', action: 'forward' }, '*');
-        });
-        
-        urlInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-                let targetPath = urlInput.value.trim();
-                let targetUrl = targetPath;
-                if (!targetPath.startsWith('/') && !targetPath.startsWith('http://') && !targetPath.startsWith('https://')) {
-                    targetPath = '/' + targetPath;
-                }
-                
-                if (targetPath.startsWith('/')) {
-                    targetUrl = proxyBaseUrl + targetPath;
-                }
-                
-                iframe.src = targetUrl;
-            }
-        });
+/**
+ * Loads the webview shell from src/webview.html and fills in the per-session
+ * placeholders. The template is cached after the first read since it never
+ * changes at runtime.
+ */
+function getWebviewContent(
+  context: vscode.ExtensionContext,
+  proxyUrl: string,
+  targetLabel: string
+): string {
+  if (webviewTemplateCache === null) {
+    const templatePath = path.join(context.extensionPath, 'out', 'webview.html');
+    webviewTemplateCache = fs.readFileSync(templatePath, 'utf8');
+  }
 
-        jumpCodeBtn.addEventListener('click', () => {
-            if (!jumpReady) return;
-            vscode.postMessage({ action: 'jump' });
-        });
-        
-        toggleInspectorBtn.addEventListener('click', () => {
-            inspectorEnabled = !inspectorEnabled;
-            if (inspectorEnabled) {
-                toggleInspectorBtn.classList.add('active');
-                inspectorText.textContent = 'Inspector: ON';
-            } else {
-                toggleInspectorBtn.classList.remove('active');
-                inspectorText.textContent = 'Inspector: OFF';
-                setJumpTarget(null);
-            }
-            sendInspectorState();
-        });
-        
-        function sendInspectorState() {
-            if (iframe && iframe.contentWindow) {
-                iframe.contentWindow.postMessage({
-                    type: 'KEXARI_LENS_SET_STATE',
-                    enabled: inspectorEnabled
-                }, '*');
-            }
-        }
-        
-        // the iframe reloads on navigation, wiping the injected script's state,
-        // so we need to re-send the toggle state every time it loads
-        iframe.addEventListener('load', () => {
-            setJumpTarget(null);
-            sendInspectorState();
-        });
-
-        // Extension enables Code only after clipboard path resolves to a real file.
-        window.addEventListener('message', (event) => {
-            const message = event.data;
-            if (!message) return;
-            if (message.type === 'KEXARI_LENS_JUMP_READY') {
-                setJumpReady(true, message.path || '');
-            } else if (message.type === 'KEXARI_LENS_JUMP_UNAVAILABLE') {
-                setJumpReady(false);
-            }
-        });
-        
-        window.addEventListener('message', (event) => {
-            const message = event.data;
-            if (message) {
-                if (message.type === 'KEXARI_LENS_INSPECTOR_CLICK') {
-                    // Keep Code disabled until extension confirms a known path.
-                    setJumpTarget(message.payload.jumpTarget || null);
-                    vscode.postMessage({ action: 'inspect', ...message.payload });
-                } else if (message.type === 'KEXARI_LENS_SELECTION_CLEARED') {
-                    setJumpTarget(null);
-                } else if (message.type === 'KEXARI_LENS_URL_CHANGED') {
-                    const currentUrl = message.payload.url;
-                    if (currentUrl.startsWith(proxyBaseUrl)) {
-                        urlInput.value = currentUrl.substring(proxyBaseUrl.length) || '/';
-                    } else {
-                        urlInput.value = currentUrl;
-                    }
-                }
-            }
-        });
-    </script>
-</body>
-</html>`;
+  return webviewTemplateCache
+    .replace(/\{\{PROXY_URL\}\}/g, proxyUrl)
+    .replace(/\{\{TARGET_LABEL\}\}/g, escapeHtml(targetLabel));
 }
 
 function notifyJumpAvailability(session: KexariSession, ready: boolean, pathLabel?: string): void {
@@ -673,7 +596,10 @@ async function handleInspectClipboard(
         displayPath: String(displayPath).replace(/\\/g, '/'),
         lineNumber: resolved.lineNumber,
         absolutePath,
-        text: String(target.text || '').trim()
+        text: String(target.text || '').trim(),
+        stylesPrompt: target.stylesPrompt || '',
+        owners: target.owners || [],
+        stackedComponents: (target.owners || []).map((o: any) => o.componentName).join(' > ')
       });
     }
 
@@ -689,35 +615,20 @@ async function handleInspectClipboard(
       jumpResolved.displayPath !== 'Unknown' &&
       (jumpResolved.lineNumber || 0) > 0;
 
+    // Store full data for Copy for AI (with computed styles)
+    lastInspectedData = { resolvedTargets, mode, viewport, targets };
+
+    // Minimal clipboard on click — one header, per-element blocks, one trailing Instruction.
+    const blockTemplate = '{{viewportSummary}}Target Component: {{componentName}}{{stackedComponents}}\nFile Path: {{displayPath}}:{{lineNumber}}\nElement: <{{tagName}} className="{{className}}">';
+
     let formattedPrompt = '';
-    const viewportLine = viewport?.summary
-      ? `Current Viewport: ${viewport.summary}`
-      : null;
-
     if (mode === 'multi' && resolvedTargets.length > 1) {
-      const blocks = resolvedTargets.map((t, i) =>
-        `[${i + 1}] Target Component: ${t.componentName}
-File Path: ${t.displayPath}:${t.lineNumber}
-Element: <${t.tagName} className="${t.className}">`
+      const blocks = resolvedTargets.map((t: any, i: number) =>
+        resolvePrompt(blockTemplate, { ...t, mode: 'multi', index: i + 1, viewport })
       ).join('\n\n');
-
-      formattedPrompt = `[Kexari Lens Context]
-Mode: Multi-Element Targeting
-${viewportLine ? viewportLine + '\n' : ''}Selected Elements: ${resolvedTargets.length}
-
-${blocks}
-
-Instruction:
-`;
+      formattedPrompt = `[Kexari Lens Context]\n${blocks}\n\nInstruction:`;
     } else {
-      const t = resolvedTargets[0];
-      formattedPrompt = `[Kexari Lens Context]
-${viewportLine ? viewportLine + '\n' : ''}Target Component: ${t.componentName}
-File Path: ${t.displayPath}:${t.lineNumber}
-Element: <${t.tagName} className="${t.className}">
-
-Instruction:
-`;
+      formattedPrompt = `[Kexari Lens Context]\n${resolvePrompt(blockTemplate, { ...resolvedTargets[0], mode: 'single', index: 1, viewport })}\n\nInstruction:`;
     }
 
     await vscode.env.clipboard.writeText(formattedPrompt);
@@ -764,6 +675,27 @@ Instruction:
 }
 
 /** Read the File Path:line from the Kexari clipboard payload (source of truth). */
+/** Resolves a prompt template with context data. Supports: {{componentName}}, {{displayPath}}, {{lineNumber}}, {{tagName}}, {{className}}, {{text}}, {{cssStyles}}, {{viewportSummary}}, {{stackedComponents}}, {{landmark}}, {{mode}}, {{index}} */
+function resolvePrompt(template: string, ctx: any): string {
+  const viewportSummary = ctx.viewport?.summary ? `Viewport: ${ctx.viewport.summary}\n` : '';
+  const cssBlock = ctx.stylesPrompt ? `\nComputed Styles:\n${ctx.stylesPrompt}\n` : '';
+  const stackedChain = ctx.stackedComponents ? `\nComponent Chain: ${ctx.stackedComponents}` : '';
+
+  return template
+    .replace(/\{\{componentName\}\}/g, ctx.componentName || 'Unknown')
+    .replace(/\{\{displayPath\}\}/g, ctx.displayPath || 'Unknown')
+    .replace(/\{\{lineNumber\}\}/g, String(ctx.lineNumber || 0))
+    .replace(/\{\{tagName\}\}/g, ctx.tagName || 'div')
+    .replace(/\{\{className\}\}/g, ctx.className || '')
+    .replace(/\{\{text\}\}/g, ctx.text || '')
+    .replace(/\{\{cssStyles\}\}/g, cssBlock)
+    .replace(/\{\{viewportSummary\}\}/g, viewportSummary)
+    .replace(/\{\{stackedComponents\}\}/g, stackedChain)
+    .replace(/\{\{landmark\}\}/g, ctx.landmark || '')
+    .replace(/\{\{mode\}\}/g, ctx.mode || 'single')
+    .replace(/\{\{index\}\}/g, String(ctx.index || 1));
+}
+
 function parseClipboardFilePath(clipboard: string): { displayPath: string; lineNumber: number } | null {
   if (!clipboard || !clipboard.includes('[Kexari Lens Context]')) {
     return null;

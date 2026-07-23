@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kexari Lens Inspector</title>
+    <style>
+        html, body {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: var(--vscode-editor-background, #121214);
+            font-family: var(--vscode-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif);
+            display: flex;
+            flex-direction: column;
+        }
+        #toolbar {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 16px;
+            background-color: var(--vscode-editorWidget-background, #18181c);
+            border-bottom: 1px solid var(--vscode-panel-border, rgba(255, 255, 255, 0.06));
+            user-select: none;
+            box-sizing: border-box;
+            height: 44px;
+        }
+        #navigation-controls {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .nav-btn {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--vscode-foreground, #a6a6a6);
+            width: 28px;
+            height: 28px;
+            border-radius: 6px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-sizing: border-box;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .nav-btn:hover {
+            background-color: rgba(255, 255, 255, 0.06);
+            color: #ffffff;
+            border-color: rgba(255, 255, 255, 0.04);
+        }
+        .nav-btn:active {
+            transform: scale(0.92);
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+        .nav-btn svg {
+            width: 14px;
+            height: 14px;
+            fill: currentColor;
+        }
+        #target-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 10px;
+            height: 28px;
+            border-radius: 8px;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.22);
+            color: #a5b4fc;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+            white-space: nowrap;
+            flex-shrink: 0;
+        }
+        #target-badge svg {
+            width: 11px;
+            height: 11px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex-shrink: 0;
+        }
+        #url-bar-container {
+            display: flex;
+            flex-grow: 1;
+            align-items: center;
+            gap: 8px;
+            background-color: rgba(255, 255, 255, 0.03);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            border-radius: 8px;
+            padding: 0 12px;
+            height: 28px;
+            box-sizing: border-box;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        #url-bar-container:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.12);
+        }
+        #url-bar-container:focus-within {
+            background-color: rgba(0, 0, 0, 0.2);
+            border-color: #6366f1;
+            box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3), 0 2px 8px rgba(0, 0, 0, 0.15);
+        }
+        .url-icon {
+            width: 12px;
+            height: 12px;
+            fill: none;
+            stroke: rgba(255, 255, 255, 0.4);
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+            flex-shrink: 0;
+        }
+        #url-input {
+            background: none;
+            border: none;
+            outline: none;
+            color: var(--vscode-input-foreground, #e2e8f0);
+            font-family: var(--vscode-editor-font-family, Menlo, Monaco, Consolas, "Courier New", monospace);
+            font-size: 11px;
+            width: 100%;
+            padding: 0;
+            margin: 0;
+            letter-spacing: 0.3px;
+        }
+        #toggle-inspector-btn {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 14px;
+            height: 28px;
+            border-radius: 20px;
+            cursor: pointer;
+            box-sizing: border-box;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid transparent;
+        }
+        #toggle-inspector-btn.active {
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.12), rgba(79, 70, 229, 0.12));
+            border-color: rgba(99, 102, 241, 0.25);
+            color: #a5b4fc;
+            box-shadow: 0 2px 6px rgba(99, 102, 241, 0.1);
+        }
+        #toggle-inspector-btn.active:hover {
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.18), rgba(79, 70, 229, 0.18));
+            border-color: rgba(99, 102, 241, 0.4);
+            color: #c7d2fe;
+        }
+        #toggle-inspector-btn:not(.active) {
+            background: rgba(255, 255, 255, 0.02);
+            border-color: rgba(255, 255, 255, 0.05);
+            color: #94a3b8;
+        }
+        #toggle-inspector-btn:not(.active):hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: rgba(255, 255, 255, 0.1);
+            color: #cbd5e1;
+        }
+        .inspector-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        #toggle-inspector-btn.active .inspector-dot {
+            background-color: #10b981;
+            box-shadow: 0 0 8px #10b981, 0 0 16px rgba(16, 185, 129, 0.4);
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+        #toggle-inspector-btn:not(.active) .inspector-dot {
+            background-color: #64748b;
+        }
+        .inspector-icon {
+            width: 12px;
+            height: 12px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+        #jump-code-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            height: 28px;
+            border-radius: 8px;
+            box-sizing: border-box;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid rgba(255, 255, 255, 0.06);
+            background: rgba(255, 255, 255, 0.02);
+            color: #64748b;
+            cursor: not-allowed;
+            opacity: 0.55;
+        }
+        #jump-code-btn.enabled {
+            cursor: pointer;
+            opacity: 1;
+            background: linear-gradient(135deg, rgba(34, 211, 238, 0.12), rgba(99, 102, 241, 0.12));
+            border-color: rgba(34, 211, 238, 0.3);
+            color: #a5f3fc;
+        }
+        #jump-code-btn.enabled:hover {
+            background: linear-gradient(135deg, rgba(34, 211, 238, 0.2), rgba(99, 102, 241, 0.18));
+            border-color: rgba(34, 211, 238, 0.45);
+            color: #cffafe;
+        }
+        #jump-code-btn:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+        #copy-ai-btn {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 12px;
+            height: 28px;
+            border-radius: 8px;
+            box-sizing: border-box;
+            font-size: 11px;
+            font-weight: 600;
+            letter-spacing: 0.4px;
+            text-transform: uppercase;
+            transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid rgba(16, 185, 129, 0.25);
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(5, 150, 105, 0.08));
+            color: #6ee7b7;
+            cursor: pointer;
+        }
+        #copy-ai-btn:hover {
+            background: linear-gradient(135deg, rgba(16, 185, 129, 0.18), rgba(5, 150, 105, 0.14));
+            border-color: rgba(16, 185, 129, 0.45);
+            color: #a7f3d0;
+        }
+        #copy-ai-btn:active {
+            transform: scale(0.95);
+        }
+        #breadcrumb-bar {
+            display: none;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 16px;
+            background-color: var(--vscode-editorWidget-background, #18181c);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            user-select: none;
+            box-sizing: border-box;
+            min-height: 26px;
+            flex-wrap: wrap;
+            font-size: 10px;
+        }
+        #breadcrumb-bar.visible {
+            display: flex;
+        }
+        #css-panel {
+            display: none;
+            flex-direction: column;
+            gap: 6px;
+            padding: 10px 16px;
+            background-color: var(--vscode-editorWidget-background, #18181c);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+            user-select: none;
+            box-sizing: border-box;
+            max-height: 280px;
+            overflow-y: auto;
+            font-size: 11px;
+        }
+        #css-panel.visible {
+            display: flex;
+        }
+        .breadcrumb-item {
+            color: #94a3b8;
+            cursor: pointer;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: all 0.15s;
+            white-space: nowrap;
+            font-weight: 500;
+        }
+        .breadcrumb-item:hover {
+            background: rgba(99, 102, 241, 0.12);
+            color: #a5b4fc;
+        }
+        .breadcrumb-item:last-child {
+            color: #a5f3fc;
+            font-weight: 700;
+            cursor: default;
+        }
+        .breadcrumb-arrow {
+            color: rgba(255, 255, 255, 0.15);
+            font-size: 8px;
+        }
+        #iframe-container {
+            flex-grow: 1;
+            position: relative;
+            width: 100%;
+            height: calc(100% - 44px);
+        }
+        iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+            overflow: hidden;
+            background-color: #121214;
+        }
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+                transform: scale(1);
+            }
+            50% {
+                opacity: .6;
+                transform: scale(1.15);
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="toolbar">
+        <div id="navigation-controls">
+            <button id="back-btn" class="nav-btn" title="Back">
+                <svg viewBox="0 0 24 24"><path d="M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z"/></svg>
+            </button>
+            <button id="forward-btn" class="nav-btn" title="Forward">
+                <svg viewBox="0 0 24 24"><path d="M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8-8-8z"/></svg>
+            </button>
+            <button id="reload-btn" class="nav-btn" title="Reload">
+                <svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.07 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+            </button>
+        </div>
+        <div id="target-badge" title="Dev server this panel is inspecting">
+            <svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"></rect><path d="M2 9h20"></path></svg>
+            <span>{{TARGET_LABEL}}</span>
+        </div>
+        <div id="url-bar-container">
+            <svg class="url-icon" viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+            <input type="text" id="url-input" value="/" placeholder="Enter URL path (e.g. /about)" />
+        </div>
+        <button id="jump-code-btn" disabled title="Select an element first, then jump to its source">
+            <span>Code</span>
+        </button>
+        <button id="toggle-inspector-btn" class="active" title="Toggle Visual Inspector (Selector)">
+            <svg class="inspector-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="3"></circle></svg>
+            <span class="inspector-dot"></span>
+            <span class="inspector-text">Inspector: ON</span>
+        </button>
+    </div>
+    <div id="breadcrumb-bar">
+        <span id="breadcrumb-content"></span>
+    </div>
+    <div id="iframe-container">
+        <iframe id="proxy-iframe" src="{{PROXY_URL}}"></iframe>
+    </div>
+
+    <script>
+        const vscode = acquireVsCodeApi();
+        const iframe = document.getElementById('proxy-iframe');
+        const urlInput = document.getElementById('url-input');
+        const backBtn = document.getElementById('back-btn');
+        const forwardBtn = document.getElementById('forward-btn');
+        const reloadBtn = document.getElementById('reload-btn');
+        const toggleInspectorBtn = document.getElementById('toggle-inspector-btn');
+        const inspectorText = toggleInspectorBtn.querySelector('.inspector-text');
+        const jumpCodeBtn = document.getElementById('jump-code-btn');
+        const breadcrumbBar = document.getElementById('breadcrumb-bar');
+        const breadcrumbContent = document.getElementById('breadcrumb-content');
+
+        let inspectorEnabled = true;
+        let jumpReady = false;
+        const proxyBaseUrl = "{{PROXY_URL}}";
+
+        function setJumpReady(ready, label) {
+            jumpReady = !!ready;
+            if (jumpReady) {
+                jumpCodeBtn.disabled = false;
+                jumpCodeBtn.classList.add('enabled');
+                jumpCodeBtn.title = label
+                    ? ('Open ' + label)
+                    : 'Open clipboard source path in editor';
+            } else {
+                jumpCodeBtn.disabled = true;
+                jumpCodeBtn.classList.remove('enabled');
+                jumpCodeBtn.title = 'Select an element with a known source path first';
+            }
+        }
+
+        function setJumpTarget(target) {
+            jumpTarget = target || null;
+            // Stay disabled until the extension resolves a real file path.
+            setJumpReady(false);
+        }
+
+        reloadBtn.addEventListener('click', () => {
+            iframe.contentWindow.postMessage({ type: 'KEXARI_LENS_NAVIGATE', action: 'reload' }, '*');
+        });
+
+        backBtn.addEventListener('click', () => {
+            iframe.contentWindow.postMessage({ type: 'KEXARI_LENS_NAVIGATE', action: 'back' }, '*');
+        });
+
+        forwardBtn.addEventListener('click', () => {
+            iframe.contentWindow.postMessage({ type: 'KEXARI_LENS_NAVIGATE', action: 'forward' }, '*');
+        });
+
+        urlInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                let targetPath = urlInput.value.trim();
+                let targetUrl = targetPath;
+                if (!targetPath.startsWith('/') && !targetPath.startsWith('http://') && !targetPath.startsWith('https://')) {
+                    targetPath = '/' + targetPath;
+                }
+
+                if (targetPath.startsWith('/')) {
+                    targetUrl = proxyBaseUrl + targetPath;
+                }
+
+                iframe.src = targetUrl;
+            }
+        });
+
+        jumpCodeBtn.addEventListener('click', () => {
+            if (!jumpReady) return;
+            vscode.postMessage({ action: 'jump' });
+        });
+
+        toggleInspectorBtn.addEventListener('click', () => {
+            inspectorEnabled = !inspectorEnabled;
+            if (inspectorEnabled) { toggleInspectorBtn.classList.add('active'); inspectorText.textContent = 'Inspector: ON'; }
+            else { toggleInspectorBtn.classList.remove('active'); inspectorText.textContent = 'Inspector: OFF'; setJumpReady(false); }
+            sendInspectorState();
+        });
+
+        function sendInspectorState() {
+            if (iframe && iframe.contentWindow) {
+                iframe.contentWindow.postMessage({
+                    type: 'KEXARI_LENS_SET_STATE',
+                    enabled: inspectorEnabled
+                }, '*');
+            }
+        }
+
+        // the iframe reloads on navigation, wiping the injected script's state,
+        // so we need to re-send the toggle state every time it loads
+        iframe.addEventListener('load', () => {
+            setJumpTarget(null);
+            sendInspectorState();
+        });
+
+        // Extension enables Code only after clipboard path resolves to a real file.
+        window.addEventListener('message', (event) => {
+            const message = event.data;
+            if (!message) return;
+            if (message.type === 'KEXARI_LENS_JUMP_READY') {
+                setJumpReady(true, message.path || '');
+            } else if (message.type === 'KEXARI_LENS_JUMP_UNAVAILABLE') {
+                setJumpReady(false);
+            } else if (message.type === 'KEXARI_LENS_APPLY_CSS' || message.type === 'KEXARI_LENS_RESET_CSS' || message.type === 'KEXARI_LENS_REFRESH_STYLES') {
+                if (iframe.contentWindow) iframe.contentWindow.postMessage(message, '*');
+            } else if (message.type === 'KEXARI_LENS_STYLES_REFRESHED') {
+                vscode.postMessage({ action: 'stylesRefreshed', ...message });
+            }
+        });
+
+        window.addEventListener('message', (event) => {
+            const message = event.data;
+            if (message) {
+                if (message.type === 'KEXARI_LENS_INSPECTOR_CLICK') {
+                    // Keep Code disabled until extension confirms a known path.
+                    setJumpTarget(message.payload.jumpTarget || null);
+                    updateBreadcrumb(message.payload);
+                    vscode.postMessage({ action: 'inspect', ...message.payload });
+                } else if (message.type === 'KEXARI_LENS_SELECTION_CLEARED') {
+                    setJumpTarget(null);
+                    updateBreadcrumb(null);
+                    vscode.postMessage({ action: 'selectionCleared' });
+                } else if (message.type === 'KEXARI_LENS_NEEDS_PLUGIN') {
+                    vscode.postMessage({ action: 'needsPlugin' });
+                } else if (message.type === 'KEXARI_LENS_URL_CHANGED') {
+                    const currentUrl = message.payload.url;
+                    if (currentUrl.startsWith(proxyBaseUrl)) {
+                        urlInput.value = currentUrl.substring(proxyBaseUrl.length) || '/';
+                    } else {
+                        urlInput.value = currentUrl;
+                    }
+                }
+            }
+        });
+
+        function updateBreadcrumb(payload) {
+            const owners = payload?.targets?.[0]?.owners || payload?.jumpTarget?.owners || [];
+            if (!owners.length) {
+                breadcrumbBar.classList.remove('visible');
+                breadcrumbContent.innerHTML = '';
+                return;
+            }
+            // Build breadcrumb from leaf (first) to root (last), display reversed
+            const items = [...owners].reverse();
+            let html = '';
+            for (let i = 0; i < items.length; i++) {
+                if (i > 0) {
+                    html += '<span class="breadcrumb-arrow">▸</span>';
+                }
+                const last = i === items.length - 1;
+                html += `<span class="breadcrumb-item"${last ? '' : ` data-component="${items[i].componentName}"`}>${items[i].componentName || 'Component'}</span>`;
+            }
+            breadcrumbContent.innerHTML = html;
+            breadcrumbBar.classList.add('visible');
+
+            // Clicking a non-last breadcrumb item re-selects that ancestor
+            breadcrumbContent.querySelectorAll('.breadcrumb-item:not(:last-child)').forEach(el => {
+                el.addEventListener('click', () => {
+                    const componentName = el.getAttribute('data-component');
+                    if (componentName && iframe && iframe.contentWindow) {
+                        iframe.contentWindow.postMessage({
+                            type: 'KEXARI_LENS_SELECT_ANCESTOR',
+                            componentName
+                        }, '*');
+                    }
+                });
+            });
+        }
+    </script>
+</body>
+</html>
