@@ -207,7 +207,8 @@ export function alreadyConfigured(content: string): boolean {
     content.includes('withKexariLens') ||
     content.includes('withKexariVite') ||
     content.includes('kexariLens(') ||
-    content.includes(MARKER)
+    content.includes(MARKER) ||
+    content.includes('@kexari-lens-dev-begin')
   );
 }
 
@@ -219,6 +220,25 @@ export function hasWebpackHook(content: string): boolean {
 /** Preferred: config wrapped with withKexariVite(...). */
 export function hasViteHook(content: string): boolean {
   return /withKexariVite\s*\(/.test(content);
+}
+
+/** Prod-safe optional loader (try/catch + identity fallback). */
+export function hasOptionalKexariLoader(content: string): boolean {
+  return (
+    content.includes('@kexari-lens-dev-begin') ||
+    /let\s+withKexari(?:Lens|Vite)\s*=\s*\(\s*config\s*\)\s*=>\s*config/.test(content)
+  );
+}
+
+/** Static ESM/CJS import of the package — breaks Vercel/CI when .kexari is absent. */
+export function hasStaticKexariImport(content: string): boolean {
+  if (hasOptionalKexariLoader(content)) {
+    return false;
+  }
+  return (
+    /import\s*\{[^}]*\}\s*from\s*['"]@kexari-lens\/dev['"]/.test(content) ||
+    /(?:const|let|var)\s*\{[^}]*\}\s*=\s*require\(['"]@kexari-lens\/dev['"]\)/.test(content)
+  );
 }
 
 /** Legacy inline injects that caused project-specific breakages. */
@@ -267,9 +287,13 @@ export function stripLegacyKexariEdits(content: string): string {
     '\n'
   );
 
-  // Drop old @kexari-lens/dev imports (ensureNamedImport re-adds the wrapper import).
-  // Keep any existing withKexariLens / withKexariVite(...) call — do not unwrap
-  // (unwrapping defineConfig(...)) left extra parens and broke configs).
+  // Optional loader block (re-added cleanly by ensureOptionalWrapper)
+  next = next.replace(
+    /\n?\/\/\s*@kexari-lens-dev-begin\n[\s\S]*?\/\/\s*@kexari-lens-dev-end\n?/g,
+    '\n'
+  );
+
+  // Drop static @kexari-lens/dev imports (breaks CI when package is local-only)
   next = next.replace(
     /import\s*\{[^}]*\}\s*from\s*['"]@kexari-lens\/dev['"]\s*;?[^\n]*\n?/g,
     ''
@@ -434,50 +458,57 @@ export function ensureEmptyTurbopackConfig(content: string): string {
   );
 }
 
-function ensureNamedImport(content: string, names: string[], isEsm: boolean): string {
-  const needed = names.filter((n) => {
-    const re = new RegExp(`\\b${n}\\b`);
-    return !re.test(content);
-  });
-  if (needed.length === 0) {
+/**
+ * Insert a prod-safe optional loader:
+ *   let withKexariLens = (config) => config;
+ *   try { withKexariLens = require(...).withKexariLens } catch {}
+ * Never uses a static import of @kexari-lens/dev (that breaks Vercel/CI).
+ */
+export function ensureOptionalWrapper(
+  content: string,
+  wrapper: 'withKexariLens' | 'withKexariVite',
+  isEsm: boolean
+): string {
+  if (hasOptionalKexariLoader(content) && content.includes(`let ${wrapper}`)) {
     return content;
   }
 
-  const importRe = isEsm
-    ? /import\s*\{([^}]*)\}\s*from\s*['"]@kexari-lens\/dev['"]\s*;?[^\n]*/
-    : /(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(['"]@kexari-lens\/dev['"]\)\s*;?[^\n]*/;
+  const cjsBlock = `// @kexari-lens-dev-begin
+// Local-only: identity no-op when @kexari-lens/dev is missing (CI / Vercel / prod install)
+let ${wrapper} = (config) => config;
+try { ${wrapper} = require('@kexari-lens/dev').${wrapper}; } catch (_) {
+  try { ${wrapper} = require('./.kexari/kexari-lens-dev').${wrapper}; } catch (_) {}
+}
+// @kexari-lens-dev-end
+`;
 
-  if (importRe.test(content)) {
-    return content.replace(importRe, (_full, inner: string) => {
-      const existing = inner.split(',').map((s: string) => s.trim()).filter(Boolean);
-      for (const n of needed) {
-        if (!existing.includes(n)) {
-          existing.push(n);
-        }
-      }
-      if (isEsm) {
-        return `import { ${existing.join(', ')} } from '${PKG_NAME}'; // ${MARKER}`;
-      }
-      return `const { ${existing.join(', ')} } = require('${PKG_NAME}'); // ${MARKER}`;
-    });
-  }
+  const esmBlock = `// @kexari-lens-dev-begin
+import { createRequire as __kexariCreateRequire } from 'module';
+const __kexariRequire = __kexariCreateRequire(import.meta.url);
+// Local-only: identity no-op when @kexari-lens/dev is missing (CI / Vercel / prod install)
+let ${wrapper} = (config) => config;
+try { ${wrapper} = __kexariRequire('@kexari-lens/dev').${wrapper}; } catch (_) {
+  try { ${wrapper} = __kexariRequire('./.kexari/kexari-lens-dev').${wrapper}; } catch (_) {}
+}
+// @kexari-lens-dev-end
+`;
 
-  const importLine = isEsm
-    ? `import { ${needed.join(', ')} } from '${PKG_NAME}'; // ${MARKER}\n`
-    : `const { ${needed.join(', ')} } = require('${PKG_NAME}'); // ${MARKER}\n`;
+  const block = isEsm ? esmBlock : cjsBlock;
 
+  // Prefer after the last top-level import / require line
   const importMatch = content.match(
     /^(?:(?:import[\s\S]*?from\s+['"][^'"]+['"];?\s*)|(?:(?:const|let|var)\s+.*?=\s*require\([^)]+\);?\s*))+/m
   );
-  if (importMatch) {
-    const end = importMatch.index! + importMatch[0].length;
-    return content.slice(0, end) + importLine + content.slice(end);
+  if (importMatch && importMatch.index !== undefined) {
+    const end = importMatch.index + importMatch[0].length;
+    return content.slice(0, end) + '\n' + block + content.slice(end);
   }
-  return importLine + content;
+  return block + content;
 }
+
 /**
  * Safe Next config patch using withKexariLens() wrapper.
- * Never edits the project's webpack() body.
+ * Never edits the project's webpack() body. Never static-imports the package.
  */
 export function patchNextConfig(content: string, _plan: CompatPlan): string {
   const isEsm =
@@ -486,18 +517,24 @@ export function patchNextConfig(content: string, _plan: CompatPlan): string {
     content.includes('import.meta');
 
   let next = stripLegacyKexariEdits(content);
-  next = ensureNamedImport(next, ['withKexariLens'], isEsm);
+  next = ensureOptionalWrapper(next, 'withKexariLens', isEsm);
   next = wrapDefaultExport(next, 'withKexariLens');
   return next;
 }
 
 /**
  * Safe Vite config patch using withKexariVite() wrapper.
- * Never rewrites plugins: [react()] one-liners.
+ * Never rewrites plugins: [react()] one-liners. Never static-imports the package.
  */
 export function patchViteConfig(content: string): string {
+  const isEsm =
+    /\bexport\s+default\b/.test(content) ||
+    /\bimport\s+/.test(content) ||
+    content.includes('import.meta') ||
+    true;
+
   let next = stripLegacyKexariEdits(content);
-  next = ensureNamedImport(next, ['withKexariVite'], true);
+  next = ensureOptionalWrapper(next, 'withKexariVite', isEsm);
   next = wrapDefaultExport(next, 'withKexariVite');
   return next;
 }
@@ -506,6 +543,14 @@ export function validatePatchedNextConfig(content: string, _plan: CompatPlan): s
   const errors: string[] = [];
   if (hasBrokenKexariTurbopackRules(content)) {
     errors.push('Patched config still contains kexariLensTurbopackRules (unsafe).');
+  }
+  if (hasStaticKexariImport(content)) {
+    errors.push(
+      'Static import of @kexari-lens/dev breaks CI/prod — use the optional try/catch loader.'
+    );
+  }
+  if (!hasOptionalKexariLoader(content)) {
+    errors.push('Patched config is missing the optional Kexari loader (prod-safe try/catch).');
   }
   if (!hasWebpackHook(content)) {
     errors.push('Patched config is missing withKexariLens(...) wrapper.');
@@ -528,6 +573,14 @@ export function blockingPatchErrors(errors: string[]): string[] {
 
 export function validatePatchedViteConfig(content: string): string[] {
   const errors: string[] = [];
+  if (hasStaticKexariImport(content)) {
+    errors.push(
+      'Static import of @kexari-lens/dev breaks CI/prod — use the optional try/catch loader.'
+    );
+  }
+  if (!hasOptionalKexariLoader(content)) {
+    errors.push('Patched Vite config is missing the optional Kexari loader (prod-safe try/catch).');
+  }
   if (!hasViteHook(content)) {
     errors.push('Patched Vite config is missing withKexariVite(...) wrapper.');
   }
@@ -565,10 +618,13 @@ export function isNextConfigReady(
   if (hasBrokenKexariTurbopackRules(content)) {
     return false;
   }
+  if (hasStaticKexariImport(content)) {
+    return false;
+  }
   if (hasLegacyInlineInject(content) && !hasWebpackHook(content)) {
     return false;
   }
-  if (!hasWebpackHook(content)) {
+  if (!hasWebpackHook(content) || !hasOptionalKexariLoader(content)) {
     return false;
   }
   if (plan.forceWebpackDevFlag && !scriptUsesWebpack(devScript)) {

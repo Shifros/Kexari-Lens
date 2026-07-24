@@ -2,7 +2,7 @@
   "name": "kexari-lens",
   "displayName": "Kexari Lens",
   "description": "Visual element inspector for React/Next.js — click to copy component + file:line",
-  "version": "0.5.2",
+  "version": "0.5.4",
   "publisher": "shifros",
   "icon": "Shifros-favicon.png",
   "license": "MIT",

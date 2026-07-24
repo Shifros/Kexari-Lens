@@ -25,14 +25,15 @@ Lens detects **installed** Next/React versions (from `node_modules` when present
 
 Install / Repair will:
 
-- Vendor `@kexari-lens/dev` under `.kexari/` (gitignored)
-- Patch config by **wrapping** the default export (`withKexariLens` / `withKexariVite`) — it never rewrites your `webpack()` body or `plugins: [...]` one-liners
-- Strip any old broken turbopack / inline injects, refuse to write invalid patches
+- Vendor `@kexari-lens/dev` under `.kexari/` (gitignored) and install its deps **there only**
+- **Never** add it to root `package.json` (avoids Vercel/CI failures when `.kexari` is absent)
+- Patch config with an **optional try/catch loader** + `withKexariLens` / `withKexariVite` — identity no-op when the package is missing
+- Strip any old static imports / broken turbopack / inline injects
 - Adjust `npm run dev` only when required for webpack
 
 ## Why the plugin?
 
-React 19 removed Fiber `_debugSource`. Exact file paths need a small **dev-only** compile-time plugin that injects `data-kexari-source` on JSX host elements. `withKexariLens` only pushes that plugin when `dev` is true — production builds stay clean.
+React 19 removed Fiber `_debugSource`. Exact file paths need a small **dev-only** compile-time plugin that injects `data-kexari-source` on JSX host elements. `withKexariLens` only pushes that plugin when `dev` is true — production builds stay clean. On CI/Vercel the optional loader falls back to `(config) => config`.
 
 ## What it does
 
@@ -50,16 +51,21 @@ React 19 removed Fiber `_debugSource`. Exact file paths need a small **dev-only*
 
 ## Manual plugin setup (optional)
 
-Prefer the Connect prompt. Or:
+Prefer the Connect prompt. Or vendor locally and use a **prod-safe** config (no static import):
 
-```bash
-npm install -D @kexari-lens/dev
-```
-
-**Next.js (preferred — also use on Next 16 via `next dev --webpack`)**
+**Next.js**
 
 ```js
-import { withKexariLens } from '@kexari-lens/dev';
+// @kexari-lens-dev-begin
+let withKexariLens = (config) => config;
+try {
+  withKexariLens = require('@kexari-lens/dev').withKexariLens;
+} catch (_) {
+  try {
+    withKexariLens = require('./.kexari/kexari-lens-dev').withKexariLens;
+  } catch (_) {}
+}
+// @kexari-lens-dev-end
 
 const nextConfig = {
   // your existing options / webpack() stay untouched
@@ -71,21 +77,9 @@ export default withKexariLens(nextConfig);
 { "scripts": { "dev": "next dev --webpack" } }
 ```
 
-**Vite**
+**Vite** — same pattern with `withKexariVite` via `createRequire` in ESM configs.
 
-```js
-import { withKexariVite } from '@kexari-lens/dev';
-import { defineConfig } from 'vite';
-import react from '@vitejs/plugin-react';
-
-export default withKexariVite(
-  defineConfig({
-    plugins: [react()],
-  })
-);
-```
-
-Until the package is on the public npm registry, Connect vendors it under `.kexari/` and installs via `file:./.kexari/kexari-lens-dev`.
+Do **not** add `@kexari-lens/dev` to `package.json`. Keep `.kexari/` and `*.kexari-bak` (e.g. `next.config.js.kexari-bak`) in `.gitignore`. Connect / Repair does this automatically.
 
 ## Install extension from source
 

@@ -9,6 +9,8 @@ import {
   blockingPatchErrors,
   buildCompatPlan,
   detectFrameworkVersions,
+  hasOptionalKexariLoader,
+  hasStaticKexariImport,
   hasViteHook,
   isNextConfigReady,
   patchNextConfig,
@@ -22,8 +24,7 @@ import {
 
 const execFileAsync = promisify(execFile);
 
-/** Portable local vendor — package name is still @kexari-lens/dev. */
-const RELATIVE_VENDOR_SPEC = 'file:./.kexari/kexari-lens-dev';
+/** Portable local vendor — never added to root package.json (keeps Vercel/CI clean). */
 const VENDOR_DIR = path.join('.kexari', 'kexari-lens-dev');
 
 export type { ProjectKind };
@@ -97,37 +98,35 @@ export function detectProjectKind(root: string): ProjectKind {
   return 'unknown';
 }
 
-/** True when package.json lists @kexari-lens/dev (any spec). */
+/** True when package.json still lists @kexari-lens/dev (legacy — bad for CI). */
 export function isDevPluginListed(root: string): boolean {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
-    const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+    const deps = { ...pkg.dependencies, ...pkg.devDependencies, ...pkg.optionalDependencies };
     return Boolean(deps?.[PKG_NAME]);
   } catch {
     return false;
   }
 }
 
-/**
- * True when the vendored package files actually exist on disk.
- * package.json can list the dep while .kexari/ is missing (gitignored / cleaned).
- */
-export function isDevPluginResolvable(root: string): boolean {
+/** True when the vendored package files exist under .kexari/ (gitignored). */
+export function isDevPluginVendored(root: string): boolean {
   const vendorPkg = path.join(root, VENDOR_DIR, 'package.json');
   const vendorMain = path.join(root, VENDOR_DIR, 'src', 'index.js');
-  if (!fs.existsSync(vendorPkg) || !fs.existsSync(vendorMain)) {
+  return fs.existsSync(vendorPkg) && fs.existsSync(vendorMain);
+}
+
+/**
+ * True when the local vendor can be required (self-contained deps under .kexari,
+ * or a leftover root node_modules link from an older Install).
+ */
+export function isDevPluginResolvable(root: string): boolean {
+  if (!isDevPluginVendored(root)) {
     return false;
   }
-  const linkedPkg = path.join(root, 'node_modules', '@kexari-lens', 'dev', 'package.json');
-  if (!fs.existsSync(linkedPkg)) {
-    return false;
-  }
-  try {
-    fs.readFileSync(linkedPkg, 'utf8');
-    return true;
-  } catch {
-    return false;
-  }
+  const vendorBabel = path.join(root, VENDOR_DIR, 'node_modules', '@babel', 'core');
+  const rootLink = path.join(root, 'node_modules', '@kexari-lens', 'dev', 'package.json');
+  return fs.existsSync(vendorBabel) || fs.existsSync(rootLink);
 }
 
 function findConfigFile(root: string, kind: ProjectKind): string | null {
@@ -168,13 +167,17 @@ export function getCompatPlanForRoot(root: string, kind?: ProjectKind): CompatPl
   return buildCompatPlan(projectKind, versions, devScript);
 }
 
-/** Listed + resolvable + config/scripts match the compat plan for this Next/Vite version. */
+/** Vendored + resolvable + config/scripts are prod-safe (optional loader, not in package.json). */
 export function isDevPluginReady(root: string, kind?: ProjectKind): boolean {
   const projectKind = kind || detectProjectKind(root);
   if (projectKind === 'unknown') {
     return true;
   }
-  if (!isDevPluginListed(root) || !isDevPluginResolvable(root)) {
+  // Legacy: still listed in package.json → needs repair so CI/Vercel don't resolve file:
+  if (isDevPluginListed(root)) {
+    return false;
+  }
+  if (!isDevPluginResolvable(root)) {
     return false;
   }
   const configPath = findConfigFile(root, projectKind);
@@ -186,7 +189,11 @@ export function isDevPluginReady(root: string, kind?: ProjectKind): boolean {
   if (projectKind === 'next') {
     return isNextConfigReady(content, plan, readDevScript(root));
   }
-  return hasViteHook(content);
+  return (
+    hasViteHook(content) &&
+    hasOptionalKexariLoader(content) &&
+    !hasStaticKexariImport(content)
+  );
 }
 
 export function hasWebpackDevScript(root: string): boolean {
@@ -200,19 +207,27 @@ export function hasWebpackDevScript(root: string): boolean {
 
 function ensureGitignoreHasKexari(root: string): void {
   const gitignorePath = path.join(root, '.gitignore');
-  const line = '.kexari/';
+  // Cover vendor dir + config backups like next.config.js.kexari-bak / vite.config.ts.kexari-bak
+  const linesToEnsure = ['.kexari/', '*.kexari-bak', '**/*.kexari-bak'];
+  const comment = '# Kexari Lens local-only (never commit / never deploy)';
+
   if (!fs.existsSync(gitignorePath)) {
-    fs.writeFileSync(gitignorePath, `${line}\n`, 'utf8');
+    fs.writeFileSync(gitignorePath, `${comment}\n${linesToEnsure.join('\n')}\n`, 'utf8');
     return;
   }
+
   const content = fs.readFileSync(gitignorePath, 'utf8');
-  if (/(^|[\r\n])\.kexari\/?(\r?\n|$)/.test(content)) {
+  const missing = linesToEnsure.filter((line) => {
+    const escaped = line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return !new RegExp(`(^|[\\r\\n])${escaped}(\\r?\\n|$)`).test(content);
+  });
+  if (missing.length === 0) {
     return;
   }
   const suffix = content.endsWith('\n') ? '' : '\n';
   fs.writeFileSync(
     gitignorePath,
-    `${content}${suffix}\n# Kexari Lens local vendor (dev-only)\n${line}\n`,
+    `${content}${suffix}\n${comment}\n${missing.join('\n')}\n`,
     'utf8'
   );
 }
@@ -282,48 +297,67 @@ async function runPackageManager(
 }
 
 /**
- * Add the vendored @kexari-lens/dev. On npm ERESOLVE (common when the app
- * already has unrelated peer conflicts, e.g. react 19 + react-helmet-async),
- * retry with --legacy-peer-deps so Install is not blocked by the host app.
+ * Install deps inside `.kexari/kexari-lens-dev` only — never add to root package.json
+ * (file: deps there break Vercel/CI when .kexari is gitignored).
+ * Also removes any leftover root package.json / lockfile entry from older Installs.
  */
 async function npmInstallDevPlugin(root: string): Promise<void> {
-  const usePnpm = fs.existsSync(path.join(root, 'pnpm-lock.yaml'));
-  const useYarn = fs.existsSync(path.join(root, 'yarn.lock')) && !usePnpm;
-
-  if (usePnpm) {
+  // Clean legacy root dependency first so CI never sees file:./.kexari/...
+  if (isDevPluginListed(root)) {
     try {
-      await runPackageManager('pnpm', ['add', '-D', RELATIVE_VENDOR_SPEC], root);
-    } catch (err) {
-      if (!isPeerResolveError(installErrorText(err))) {
-        throw err;
-      }
-      await runPackageManager(
-        'pnpm',
-        ['add', '-D', RELATIVE_VENDOR_SPEC, '--config.strict-peer-dependencies=false'],
-        root
-      );
+      await runPackageManager('npm', ['uninstall', PKG_NAME, '--legacy-peer-deps'], root);
+    } catch {
+      removeKexariFromPackageJson(root);
     }
-    return;
+  } else {
+    removeKexariFromPackageJson(root);
   }
 
-  if (useYarn) {
-    await runPackageManager('yarn', ['add', '-D', RELATIVE_VENDOR_SPEC], root);
-    return;
-  }
-
+  const vendorRoot = path.join(root, VENDOR_DIR);
   try {
-    await runPackageManager('npm', ['install', '-D', RELATIVE_VENDOR_SPEC], root);
-  } catch (err) {
-    const text = installErrorText(err);
-    if (!isPeerResolveError(text)) {
-      throw err;
-    }
-    // Host app peer graph is already broken for strict npm — add our file: dep anyway.
     await runPackageManager(
       'npm',
-      ['install', '-D', RELATIVE_VENDOR_SPEC, '--legacy-peer-deps'],
-      root
+      ['install', '--omit=peer', '--no-fund', '--no-audit'],
+      vendorRoot
     );
+  } catch (err) {
+    if (!isPeerResolveError(installErrorText(err))) {
+      // Retry once with legacy peers inside the vendor tree
+      await runPackageManager(
+        'npm',
+        ['install', '--legacy-peer-deps', '--no-fund', '--no-audit'],
+        vendorRoot
+      );
+      return;
+    }
+    await runPackageManager(
+      'npm',
+      ['install', '--legacy-peer-deps', '--no-fund', '--no-audit'],
+      vendorRoot
+    );
+  }
+
+  // Ensure .kexari stays ignored even if .gitignore was edited
+  ensureGitignoreHasKexari(root);
+}
+
+function removeKexariFromPackageJson(root: string): void {
+  const pkgPath = path.join(root, 'package.json');
+  let pkg: any;
+  try {
+    pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+  } catch {
+    return;
+  }
+  let changed = false;
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    if (pkg[field] && pkg[field][PKG_NAME]) {
+      delete pkg[field][PKG_NAME];
+      changed = true;
+    }
+  }
+  if (changed) {
+    fs.writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
   }
 }
 
@@ -371,8 +405,16 @@ export async function askAndInstallDevPlugin(
   }
 
   const needsRepair =
-    (isDevPluginListed(root) && !isDevPluginResolvable(root)) ||
-    (isDevPluginListed(root) && isDevPluginResolvable(root) && !isDevPluginReady(root, kind));
+    isDevPluginListed(root) ||
+    isDevPluginVendored(root) ||
+    (() => {
+      const cfg = findConfigFile(root, kind);
+      if (!cfg) {
+        return false;
+      }
+      const text = fs.readFileSync(cfg, 'utf8');
+      return hasStaticKexariImport(text) || hasViteHook(text) || text.includes('withKexariLens');
+    })();
 
   const versionLine = [
     plan.versions.nextVersion ? `Next ${plan.versions.nextVersion}` : null,
@@ -454,11 +496,15 @@ export async function askAndInstallDevPlugin(
     }
 
     if (patched !== original) {
+      // Always refresh gitignore before writing backups so *.kexari-bak is never committed
+      ensureGitignoreHasKexari(root);
       const backupPath = configPath + '.kexari-bak';
       if (!fs.existsSync(backupPath)) {
         fs.writeFileSync(backupPath, original, 'utf8');
       }
       fs.writeFileSync(configPath, patched, 'utf8');
+    } else {
+      ensureGitignoreHasKexari(root);
     }
 
     let scriptNote = '';
@@ -481,7 +527,7 @@ export async function askAndInstallDevPlugin(
         folder: root,
         plan,
         message:
-          'Install finished but @kexari-lens/dev still cannot be resolved. Check that .kexari/kexari-lens-dev exists.'
+          'Install finished but local .kexari/kexari-lens-dev is not ready. Check that folder exists and its npm install succeeded.'
       };
     }
 
@@ -492,8 +538,8 @@ export async function askAndInstallDevPlugin(
       repaired: needsRepair,
       plan,
       message: needsRepair
-        ? `Repaired @kexari-lens/dev (${plan.summary}).${scriptNote} Restart \`npm run dev\`, then Connect again.`
-        : `Installed @kexari-lens/dev (${plan.summary}).${scriptNote} Restart \`npm run dev\`, then Connect again.`
+        ? `Repaired local Kexari setup (${plan.summary}). Kept out of package.json / git.${scriptNote} Restart \`npm run dev\`, then Connect again.`
+        : `Installed local Kexari setup under .kexari/ (${plan.summary}). Not added to package.json.${scriptNote} Restart \`npm run dev\`, then Connect again.`
     };
   } catch (err: unknown) {
     const detailMsg = installErrorText(err);
