@@ -115,6 +115,8 @@ export default nextConfig;
   );
   const patched15 = compat.patchNextConfig(bare, plan15);
   assert(patched15.includes('withKexariLens'), 'Next 15 patch uses withKexariLens');
+  assert(patched15.includes('@kexari-lens-dev-begin'), 'Next 15 uses optional loader');
+  assert(!/import\s*\{[^}]*\}\s*from\s*['"]@kexari-lens\/dev['"]/.test(patched15), 'Next 15 has no static import');
   assert(/export\s+default\s+withKexariLens\s*\(\s*nextConfig\s*\)/.test(patched15), 'Next 15 wraps export');
   assert(!compat.hasBrokenKexariTurbopackRules(patched15), 'Next 15 patch has no turbo rules');
   assert(!/webpack\s*:\s*\(/.test(patched15), 'Next 15 bare config does not invent webpack()');
@@ -228,6 +230,8 @@ export default defineConfig({
 `;
   const patched = compat.patchViteConfig(oneLine);
   assert(patched.includes('withKexariVite'), 'vite patch uses withKexariVite');
+  assert(patched.includes('@kexari-lens-dev-begin'), 'vite uses optional loader');
+  assert(!/import\s*\{[^}]*\}\s*from\s*['"]@kexari-lens\/dev['"]/.test(patched), 'vite has no static import');
   assert(/withKexariVite\s*\(\s*defineConfig\s*\(/.test(patched), 'vite wraps defineConfig');
   assert(patched.includes('plugins: [react()]'), 'vite one-liner plugins untouched');
   assert(!patched.includes("kexariLens({ bundler: 'vite' })"), 'vite does not inline kexariLens');
